@@ -1,0 +1,9 @@
+One way to use the network tools in Zephyr
+------------------------------------------
+
+# Go to Zephyr sources and configure submodules
+$ cd $ZEPHYR_BASE
+$ git submodule add --name 'net/ip/tools' git://git-amr-4.devtools.intel.com/zephyr_os_net_tools-tools.git net/ip/tools
+
+# Update the net tools
+$ git submodule update --init --recursive
