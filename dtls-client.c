@@ -27,6 +27,7 @@
 #include <linux/sockios.h>
 #include <ifaddrs.h>
 #include <signal.h>
+#include <unistd.h>
 
 #include <tinydtls.h>
 #include <global.h>
@@ -550,7 +551,7 @@ static int read_from_peer(struct dtls_context_t *ctx,
 	if (user_data->index == renegotiate) {
 		printf("Starting to renegotiate keys\n");
 		dtls_renegotiate(ctx, session);
-		return;
+		return 1;
 	}
 
 	try_send(ctx, session);
