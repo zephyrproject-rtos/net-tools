@@ -1565,7 +1565,7 @@ int main(int argc, char**argv)
 	int ifindex = -1, on, port;
 	void *address = NULL;
 	session_t dst;
-	struct client_data user_data;
+	struct client_data user_data = {};
 
 	coap_tid_t tid = COAP_INVALID_TID;
 	coap_context_t *coap_ctx;
