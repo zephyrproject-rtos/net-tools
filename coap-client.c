@@ -959,7 +959,7 @@ static int read_from_peer(struct dtls_context_t *ctx,
 	if (user_data->index == renegotiate) {
 		printf("Starting to renegotiate keys\n");
 		dtls_renegotiate(ctx, session);
-		return;
+		return 1;
 	}
 
 	try_send(ctx);
