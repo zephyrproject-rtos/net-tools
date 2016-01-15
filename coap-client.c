@@ -57,6 +57,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <linux/sockios.h>
 #include <ifaddrs.h>
 #include <signal.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 #include <tinydtls.h>
 #include <global.h>
