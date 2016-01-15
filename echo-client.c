@@ -26,6 +26,8 @@
 #include <net/if.h>
 #include <linux/sockios.h>
 #include <ifaddrs.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 #define SERVER_PORT  4242
 #define CLIENT_PORT  8484
