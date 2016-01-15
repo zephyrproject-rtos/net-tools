@@ -31,6 +31,7 @@
 #include <net/if.h>
 #include <linux/ipv6.h>
 #include <ifaddrs.h>
+#include <unistd.h>
 
 #define SERVER_PORT  4242
 #define CLIENT_PORT  8484
