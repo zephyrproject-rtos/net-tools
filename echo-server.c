@@ -139,17 +139,19 @@ static int receive_and_reply(fd_set *rfds, int fd_recv, int fd_send,
 			     unsigned char *buf, int buflen)
 {
 	if (FD_ISSET(fd_recv, rfds)) {
-		struct sockaddr from;
-		socklen_t fromlen;
+		struct sockaddr_in6 from = { 0 };
+		socklen_t fromlen = sizeof(from);
 		int ret;
 
-		ret = receive(fd_recv, buf, buflen, &from, &fromlen);
+		ret = receive(fd_recv, buf, buflen,
+			      (struct sockaddr *)&from, &fromlen);
 		if (ret < 0)
 			return ret;
 
 		reverse(buf, ret);
 
-		ret = reply(fd_send, buf, ret, &from, fromlen);
+		ret = reply(fd_send, buf, ret,
+			    (struct sockaddr *)&from, fromlen);
 		if (ret < 0)
 			return ret;
 
