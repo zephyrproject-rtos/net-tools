@@ -45,3 +45,6 @@ coap-client.o: coap-client.c
 
 coap-client: coap-client.o $(TINYDTLS_LIB) $(LIBCOAP_LIB)
 	$(CC) -o $@ $(LIBS) coap-client.o $(TINYDTLS_LIB) $(LIBCOAP_LIB)
+
+clean:
+	rm -f *.o tunslip6 tunslip echo-client echo-server dtls-client dtls-server monitor_15_4 coap-client
