@@ -1703,6 +1703,18 @@ int main(int argc, char**argv)
 					    addr_buf, sizeof(addr_buf)));
 	}
 
+	coap_ctx = get_coap_context(addr_recv, addr_len);
+	if (!coap_ctx) {
+		printf("\nCannot get CoAP context\n");
+		exit(-1);
+	}
+
+	/* We do not use libcoap fd but our own so we can bind to this
+	 * specific interface. Done like this so that we do not need
+	 * to modify libcoap.
+	 */
+	close(coap_ctx->endpoint->handle.fd);
+
 	ret = bind(fd, addr_recv, addr_len);
 	if (ret < 0) {
 		perror("bind");
@@ -1730,7 +1742,6 @@ int main(int argc, char**argv)
 	user_data.index = 0;
 	user_data.ifindex = ifindex;
 
-	coap_ctx = get_coap_context(addr_recv, addr_len);
 	user_data.coap_ctx = coap_ctx;
 	coap_ctx->endpoint->handle.fd = fd;
 
