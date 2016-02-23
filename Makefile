@@ -36,15 +36,25 @@ monitor_15_4.o: monitor_15_4.c
 monitor_15_4: monitor_15_4.o
 	$(CC) -o $@ $(LIBS) monitor_15_4.o $(GLIB)
 
-LIBCOAP = $(HOME)/src/coap/libcoap
+LIBCOAP = libcoap
 LIBCOAP_CFLAGS = -I$(LIBCOAP)/include -I$(LIBCOAP) -DWITH_POSIX
 LIBCOAP_LIB = $(LIBCOAP)/.libs/libcoap-1.a
 
-coap-client.o: coap-client.c
+$(LIBCOAP_LIB):
+	(cd libcoap; ./autogen.sh; ./configure; make)
+
+.PHONY: libcoap
+libcoap: $(LIBCOAP_LIB)
+
+coap-client.o: coap-client.c libcoap
 	$(CC) -c -o $@ $(CFLAGS) $(TINYDTLS_CFLAGS) $(LIBCOAP_CFLAGS) coap-client.c
 
 coap-client: coap-client.o $(TINYDTLS_LIB) $(LIBCOAP_LIB)
 	$(CC) -o $@ $(LIBS) coap-client.o $(TINYDTLS_LIB) $(LIBCOAP_LIB)
 
-clean:
+.PHONY: clean-libcoap
+clean-libcoap:
+	(cd libcoap; make distclean)
+
+clean: clean-libcoap
 	rm -f *.o tunslip6 tunslip echo-client echo-server dtls-client dtls-server monitor_15_4 coap-client
