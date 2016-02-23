@@ -413,6 +413,7 @@ static int find_address(int family, struct ifaddrs *if_address,
 			const char *if_name, void *address)
 {
 	struct ifaddrs *tmp;
+	struct sockaddr_in6 *ll = NULL;
 	int error = -ENOENT;
 
 	for (tmp = if_address; tmp; tmp = tmp->ifa_next) {
@@ -440,8 +441,10 @@ static int find_address(int family, struct ifaddrs *if_address,
 				if (!memcmp(&in6->sin6_addr, &in6addr_any,
 					    sizeof(struct in6_addr)))
 					continue;
-				if (IN6_IS_ADDR_LINKLOCAL(&in6->sin6_addr))
+				if (IN6_IS_ADDR_LINKLOCAL(&in6->sin6_addr)) {
+					ll = in6;
 					continue;
+				}
 
 				memcpy(address, &in6->sin6_addr,
 				       sizeof(struct in6_addr));
@@ -456,6 +459,12 @@ static int find_address(int family, struct ifaddrs *if_address,
 	}
 
 out:
+	if (error < 0 && ll) {
+		/* As a last resort use link local address */
+		memcpy(address, &ll->sin6_addr, sizeof(struct in6_addr));
+		error = 0;
+	}
+
 	return error;
 }
 
