@@ -145,13 +145,11 @@ dtls-client is a tool that is run in Linux host side and
 which connects to dtls-server running in qemu.
 
 You needs to setup the slip connection (see the steps 1 to 3)
-in tunslip6 section of this document. You also need tinyDTLS
-sources which can be found here http://sourceforge.net/projects/tinydtls/
-Compile and install the tinyDTLS library in host.
+in tunslip6 section of this document.
 
 Example:
 
-$ make TINYDTLS=/home/user/tinydtls-0.8.2 dtls-client
+$ make dtls-client
 
 $ ./dtls-client -b 2001:db8::1 2001:db8::2
 
@@ -168,7 +166,7 @@ in tunslip6 section of this document.
 
 Example:
 
-$ make TINYDTLS=/home/user/tinydtls-0.8.2 dtls-server
+$ make dtls-server
 
 $ ./dtls-server -i tun0
 
@@ -205,17 +203,11 @@ coap-client is a tool that is run in Linux host side and
 which connects to coap-server running in qemu.
 
 You needs to setup the slip connection (see the steps 1 to 3)
-in tunslip6 section of this document. You also need tinyDTLS
-sources which can be found here http://sourceforge.net/projects/tinydtls/
-Compile and install the tinyDTLS library in host.
-You will also need libcoap package which can be found here
-https://github.com/obgm/libcoap.git
-Compile and install the libcoap library in host.
+in tunslip6 section of this document.
 
 Example:
 
-$ make TINYDTLS=/home/user/tinydtls-0.8.2 \
-       LIBCOAP=/home/user/libcoap coap-client
+$ make coap-client
 
 If you want to use DTLS then run client like this
 $ sudo ./coap-client -i tun0 2001:db8::2
