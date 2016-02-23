@@ -149,11 +149,13 @@ coap_new_endpoint(const coap_address_t *addr, int flags) {
     coap_log(LOG_ALERT, "coap_new_endpoint: unsupported sa_family\n");
   }
 
+#if 0
   if (bind(sockfd, &addr->addr.sa, addr->size) < 0) {
     coap_log(LOG_WARNING, "coap_new_endpoint: bind");
     close (sockfd);
     return NULL;
   }
+#endif
 
   ep = coap_malloc_posix_endpoint();
   if (!ep) {
