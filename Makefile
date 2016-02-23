@@ -12,9 +12,15 @@ echo-client: echo-client.o
 echo-server: echo-server.o
 	$(CC) -o $@ $(CFLAGS) $(LIBS) echo-server.c
 
-TINYDTLS = $(HOME)/src/tinydtls/tinydtls-0.8.2
+TINYDTLS = tinydtls-0.8.2
 TINYDTLS_CFLAGS = -I$(TINYDTLS) -DDTLSv12 -DWITH_SHA256 -DDTLS_ECC -DDTLS_PSK
 TINYDTLS_LIB = $(TINYDTLS)/libtinydtls.a
+
+$(TINYDTLS_LIB):
+	(cd tinydtls-0.8.2; ./configure; make)
+
+.PHONY: tinydtls
+tinydtls: $(TINYDTLS_LIB)
 
 dtls-client.o: dtls-client.c
 	$(CC) -c -o $@ $(CFLAGS) $(TINYDTLS_CFLAGS) dtls-client.c
@@ -56,5 +62,9 @@ coap-client: coap-client.o $(TINYDTLS_LIB) $(LIBCOAP_LIB)
 clean-libcoap:
 	(cd libcoap; make distclean)
 
-clean: clean-libcoap
+.PHONY: clean-tinydtls
+clean-tinydtls:
+	(cd tinydtls-0.8.2; make distclean)
+
+clean: clean-libcoap clean-tinydtls
 	rm -f *.o tunslip6 tunslip echo-client echo-server dtls-client dtls-server monitor_15_4 coap-client
