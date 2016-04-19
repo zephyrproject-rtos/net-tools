@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-/* Listen UDP (unicast or multicast) messages from tun device and send
+/* Listen UDP (unicast or multicast) and TCP messages from tun device and send
  * them back to client that is running in qemu.
  */
 
@@ -32,9 +32,9 @@
 #include <linux/ipv6.h>
 #include <ifaddrs.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #define SERVER_PORT  4242
-#define CLIENT_PORT  8484
 #define MAX_BUF_SIZE 1280	/* min IPv6 MTU, the actual data is smaller */
 #define MAX_TIMEOUT  3		/* in seconds */
 
@@ -74,11 +74,12 @@ static int get_ifindex(const char *name)
 	return ifr.ifr_ifindex;
 }
 
-static int get_socket(int family)
+static int get_socket(int family, int proto)
 {
 	int fd;
 
-	fd = socket(family, SOCK_DGRAM, IPPROTO_UDP);
+	fd = socket(family, proto == IPPROTO_TCP ? SOCK_STREAM : SOCK_DGRAM,
+		    proto);
 	if (fd < 0) {
 		perror("socket");
 		exit(-errno);
@@ -86,7 +87,8 @@ static int get_socket(int family)
 	return fd;
 }
 
-static int bind_device(int fd, const char *interface, void *addr, int len)
+static int bind_device(int fd, const char *interface, void *addr, int len,
+		       int family)
 {
 	struct ifreq ifr;
 	int ret, val = 1;
@@ -102,41 +104,87 @@ static int bind_device(int fd, const char *interface, void *addr, int len)
 
 	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
 
+	switch (family) {
+		struct sockaddr_in6 *addr6;
+		struct sockaddr_in *addr4;
+		char addr_buf[INET6_ADDRSTRLEN];
+
+	case AF_INET:
+		addr4 = ((struct sockaddr_in *)addr);
+		printf("Socket %d binding to %s\n", fd,
+		       inet_ntop(AF_INET, &addr4->sin_addr,
+				 addr_buf, sizeof(addr_buf)));
+		break;
+	case AF_INET6:
+		addr6 = ((struct sockaddr_in6 *)addr);
+		printf("Socket %d binding to %s\n", fd,
+		       inet_ntop(AF_INET6, &addr6->sin6_addr,
+				 addr_buf, sizeof(addr_buf)));
+		break;
+	}
+
 	ret = bind(fd, (struct sockaddr *)addr, len);
 	if (ret < 0) {
 		perror("bind");
-		exit(-errno);
 	}
 }
 
 static int receive(int fd, unsigned char *buf, int buflen,
-		   struct sockaddr *addr, socklen_t *addrlen)
+		   struct sockaddr *addr, socklen_t *addrlen, int proto)
 {
 	int ret;
 
-	ret = recvfrom(fd, buf, buflen, 0, addr, addrlen);
-	if (ret <= 0) {
-		perror("recv");
-		return -EINVAL;
+	if (proto == IPPROTO_UDP) {
+		ret = recvfrom(fd, buf, buflen, 0, addr, addrlen);
+		if (ret <= 0) {
+			perror("recv");
+			return -EINVAL;
+		}
+	} else if (proto == IPPROTO_TCP) {
+		ret = read(fd, buf, buflen);
+		if (ret < 0) {
+			perror("read");
+			return -EINVAL;
+		}
+	} else {
+		printf("Invalid protocol %d\n", proto);
+		return -EPROTONOSUPPORT;
 	}
 
 	return ret;
 }
 
 static int reply(int fd, unsigned char *buf, int buflen,
-		 struct sockaddr *addr, socklen_t addrlen)
+		 struct sockaddr *addr, socklen_t addrlen, int proto)
 {
 	int ret;
 
-	ret = sendto(fd, buf, buflen, 0, addr, addrlen);
-	if (ret < 0)
-		perror("send");
+	if (proto == IPPROTO_UDP) {
+		ret = sendto(fd, buf, buflen, 0, addr, addrlen);
+		if (ret < 0)
+			perror("send");
+
+	} else if (proto == IPPROTO_TCP) {
+		int sent = 0;
+
+		do {
+			ret = write(fd, buf + sent, buflen - sent);
+			if (ret <= 0)
+				break;
+
+			sent += ret;
+		} while (sent < buflen);
+
+	} else {
+		printf("Invalid protocol %d\n", proto);
+		return -EPROTONOSUPPORT;
+	}
 
 	return ret;
 }
 
-static int receive_and_reply(fd_set *rfds, int fd_recv, int fd_send,
-			     unsigned char *buf, int buflen)
+static int udp_receive_and_reply(fd_set *rfds, int fd_recv, int fd_send,
+				 unsigned char *buf, int buflen, int proto)
 {
 	if (FD_ISSET(fd_recv, rfds)) {
 		struct sockaddr_in6 from = { 0 };
@@ -144,14 +192,14 @@ static int receive_and_reply(fd_set *rfds, int fd_recv, int fd_send,
 		int ret;
 
 		ret = receive(fd_recv, buf, buflen,
-			      (struct sockaddr *)&from, &fromlen);
+			      (struct sockaddr *)&from, &fromlen, proto);
 		if (ret < 0)
 			return ret;
 
 		reverse(buf, ret);
 
 		ret = reply(fd_send, buf, ret,
-			    (struct sockaddr *)&from, fromlen);
+			    (struct sockaddr *)&from, fromlen, proto);
 		if (ret < 0)
 			return ret;
 
@@ -159,6 +207,35 @@ static int receive_and_reply(fd_set *rfds, int fd_recv, int fd_send,
 	}
 
 	return 0;
+}
+
+static int tcp_receive_and_reply(fd_set *rfds, fd_set *errfds,
+				 int fd_recv, int fd_send,
+				 unsigned char *buf, int buflen, int proto)
+{
+	struct sockaddr_in6 from = { 0 };
+	socklen_t fromlen = sizeof(from);
+	int ret = 0;
+
+	if (FD_ISSET(fd_recv, rfds)) {
+		ret = receive(fd_recv, buf, buflen,
+			      (struct sockaddr *)&from, &fromlen, proto);
+		if (ret < 0)
+			return ret;
+
+		ret = reply(fd_send, buf, ret,
+			    (struct sockaddr *)&from, fromlen, proto);
+		if (ret < 0) {
+			return ret;
+		} else if (ret == 0) {
+			close(fd_recv);
+			printf("Connection closed fd %d\n", fd_recv);
+		}
+
+		fprintf(stderr, ".");
+	}
+
+	return ret;
 }
 
 #define MY_MCAST_ADDR6 \
@@ -287,7 +364,8 @@ extern char *optarg;
  */
 int main(int argc, char**argv)
 {
-	int c, ret, fd4, fd6, fd4m, fd6m, i = 0, timeout = 0;
+	int c, ret, fd4, fd6, fd4m, fd6m, tcp4, tcp6, i = 0, timeout = 0;
+	int accepted4 = -1, accepted6 = -1;
 	struct sockaddr_in6 addr6_recv = { 0 }, maddr6 = { 0 };
 	struct in6_addr mcast6_addr = MY_MCAST_ADDR6;
 	struct in_addr mcast4_addr = { 0 };
@@ -297,9 +375,10 @@ int main(int argc, char**argv)
 	char addr_buf[INET6_ADDRSTRLEN];
 	const struct in6_addr any = IN6ADDR_ANY_INIT;
 	const char *interface = NULL;
-	fd_set rfds;
+	fd_set rfds, errfds;
 	struct timeval tv = {};
 	int ifindex = -1;
+	int opt = 1;
 
 	opterr = 0;
 
@@ -353,35 +432,86 @@ int main(int argc, char**argv)
 	maddr4.sin_family = AF_INET;
 	maddr4.sin_port = htons(SERVER_PORT);
 
-	fd4 = get_socket(AF_INET);
-	fd6 = get_socket(AF_INET6);
-	fd4m = get_socket(AF_INET);
-	fd6m = get_socket(AF_INET6);
+	fd4 = get_socket(AF_INET, IPPROTO_UDP);
+	fd6 = get_socket(AF_INET6, IPPROTO_UDP);
+	fd4m = get_socket(AF_INET, IPPROTO_UDP);
+	fd6m = get_socket(AF_INET6, IPPROTO_UDP);
+	tcp4 = get_socket(AF_INET, IPPROTO_TCP);
+	tcp6 = get_socket(AF_INET6, IPPROTO_TCP);
 
-	bind_device(fd4, interface, &addr4_recv, sizeof(addr4_recv));
-	bind_device(fd6, interface, &addr6_recv, sizeof(addr6_recv));
+	printf("Sockets: UPD IPv4 %d IPv6 %d, mcast IPv4 %d IPv6 %d, "
+	       "TCP IPv4 %d IPv6 %d\n",
+	       fd4, fd6, fd4m, fd6m, tcp4, tcp6);
 
-	bind_device(fd4m, interface, &maddr4, sizeof(maddr4));
-	bind_device(fd6m, interface, &maddr6, sizeof(maddr6));
+	bind_device(fd4, interface, &addr4_recv, sizeof(addr4_recv), AF_INET);
+	bind_device(fd6, interface, &addr6_recv, sizeof(addr6_recv), AF_INET6);
+
+	bind_device(fd4m, interface, &maddr4, sizeof(maddr4), AF_INET);
+	bind_device(fd6m, interface, &maddr6, sizeof(maddr6), AF_INET6);
 
 	join_mc_group(fd4m, ifindex, AF_INET, &maddr4, sizeof(maddr4));
 	join_mc_group(fd6m, ifindex, AF_INET6, &maddr6, sizeof(maddr6));
 
-#define MAX(a,b) (((a) > (b)) ? (a) : (b))
+	ret = setsockopt(tcp4, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+	if (ret < 0) {
+		perror("setsockopt TCP v4");
+	}
+	ret = setsockopt(tcp6, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+	if (ret < 0) {
+		perror("setsockopt TCP v6");
+	}
+	bind_device(tcp4, interface, &addr4_recv, sizeof(addr4_recv), AF_INET);
+	bind_device(tcp6, interface, &addr6_recv, sizeof(addr6_recv), AF_INET6);
+
+	if (listen(tcp4, 0) < 0) {
+		perror("IPv4 TCP listen");
+	}
+	if (listen(tcp6, 0) < 0) {
+		perror("IPv6 TCP listen");
+	}
+
+	if (fcntl(tcp4, F_SETFL, O_NONBLOCK) < 0) {
+		perror("IPv4 TCP non blocking");
+	}
+
+	if (fcntl(tcp6, F_SETFL, O_NONBLOCK) < 0) {
+		perror("IPv6 TCP non blocking");
+	}
+
+#define MAX(a,b) ((a) > (b) ? (a) : (b))
 
 	while (1) {
-		int fd = MAX(fd4m, fd6m);
+		int addr4len = sizeof(addr4_recv);
+		int addr6len = sizeof(addr6_recv);
+		int fd;
 
 		FD_ZERO(&rfds);
 		FD_SET(fd4, &rfds);
 		FD_SET(fd6, &rfds);
 		FD_SET(fd4m, &rfds);
 		FD_SET(fd6m, &rfds);
+		FD_SET(tcp4, &rfds);
+		FD_SET(tcp6, &rfds);
 
-		tv.tv_sec = MAX_TIMEOUT;
-		tv.tv_usec = 0;
+		FD_ZERO(&errfds);
+		FD_SET(tcp4, &errfds);
+		FD_SET(tcp6, &errfds);
 
-		ret = select(fd + 1, &rfds, NULL, NULL, &tv);
+		fd = MAX(tcp4, tcp6);
+
+		if (accepted4 >= 0) {
+			FD_SET(accepted4, &rfds);
+			FD_SET(accepted4, &errfds);
+			fd = MAX(fd, accepted4);
+		}
+		if (accepted6 >= 0) {
+			FD_SET(accepted6, &rfds);
+			FD_SET(accepted6, &errfds);
+			fd = MAX(fd, accepted6);
+		}
+
+		ret = select(fd + 1, &rfds, NULL,
+			     &errfds, NULL);
 		if (ret < 0) {
 			perror("select");
 			break;
@@ -389,27 +519,81 @@ int main(int argc, char**argv)
 			continue;
 		}
 
+		if (accepted4 < 0) {
+			accepted4 = accept(tcp4, (struct sockaddr *)&addr4_recv,
+					   &addr4len);
+			if (accepted4 < 0 &&
+			    (errno != EAGAIN && errno != EWOULDBLOCK)) {
+				perror("accept IPv4");
+				break;
+			} else if (accepted4 >= 0) {
+				FD_SET(accepted4, &errfds);
+				FD_SET(accepted4, &rfds);
+			}
+		}
+
+		if (accepted6 < 0) {
+			accepted6 = accept(tcp6, (struct sockaddr *)&addr6_recv,
+					   &addr6len);
+			if (accepted6 < 0 &&
+			    (errno != EAGAIN && errno != EWOULDBLOCK)) {
+				perror("accept IPv6");
+				break;
+			} else if (accepted6 >= 0) {
+				FD_SET(accepted6, &errfds);
+				FD_SET(accepted6, &rfds);
+
+				printf("New connection fd %d\n", accepted6);
+			}
+		}
+
 		/* Unicast IPv4 */
-		if (receive_and_reply(&rfds, fd4, fd4, buf, sizeof(buf)) < 0)
+		if (udp_receive_and_reply(&rfds, fd4, fd4, buf, sizeof(buf),
+					  IPPROTO_UDP) < 0)
 			break;
 
 		/* Unicast IPv6 */
-		if (receive_and_reply(&rfds, fd6, fd6, buf, sizeof(buf)) < 0)
+		if (udp_receive_and_reply(&rfds, fd6, fd6, buf, sizeof(buf),
+					  IPPROTO_UDP) < 0)
 			break;
 
 		/* Multicast IPv4 */
-		if (receive_and_reply(&rfds, fd4m, fd4, buf, sizeof(buf)) < 0)
+		if (udp_receive_and_reply(&rfds, fd4m, fd4, buf, sizeof(buf),
+					  IPPROTO_UDP) < 0)
 			break;
 
 		/* Multicast IPv6 */
-		if (receive_and_reply(&rfds, fd6m, fd6, buf, sizeof(buf)) < 0)
+		if (udp_receive_and_reply(&rfds, fd6m, fd6, buf, sizeof(buf),
+					  IPPROTO_UDP) < 0)
 			break;
+
+		/* TCP IPv4 */
+		if (tcp_receive_and_reply(&rfds, &errfds,
+					  accepted4, accepted4,
+					  buf, sizeof(buf),
+					  IPPROTO_TCP) < 0) {
+			break;
+		} else if (ret == 0) {
+			accepted4 = -1;
+		}
+
+		/* TCP IPv6 */
+		if (tcp_receive_and_reply(&rfds, &errfds,
+					  accepted6, accepted6,
+					  buf, sizeof(buf),
+					  IPPROTO_TCP) < 0) {
+			break;
+		} else if (ret == 0) {
+			accepted6 = -1;
+		}
 	}
 
 	close(fd4);
 	close(fd6);
 	close(fd4m);
 	close(fd6m);
+	close(tcp4);
+	close(tcp6);
 
 	printf("\n");
 
