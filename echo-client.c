@@ -404,13 +404,13 @@ int main(int argc, char**argv)
 	const char *target = NULL, *interface = NULL;
 	fd_set rfds;
 	struct timeval tv = {};
-	int ifindex = -1;
+	int ifindex = -1, optval = 1;
 	void *address = NULL;
-	bool forever = false, help = false;
+	bool forever = false, help = false, tcp = false;
 
 	opterr = 0;
 
-	while ((c = getopt(argc, argv, "Fi:eh")) != -1) {
+	while ((c = getopt(argc, argv, "Fi:eth")) != -1) {
 		switch (c) {
 		case 'F':
 			flood = true;
@@ -420,6 +420,9 @@ int main(int argc, char**argv)
 			break;
 		case 'e':
 			forever = true;
+			break;
+		case 't':
+			tcp = true;
 			break;
 		case 'h':
 			help = true;
@@ -436,6 +439,7 @@ int main(int argc, char**argv)
 		printf("\n-i Use this network interface, needed if using "
 		       "multicast server address.\n");
 		printf("-e Do not quit, send packets forever\n");
+		printf("-t Use TCP, default is to use UDP only\n");
 		printf("-F (flood) option will prevent the client from "
 		       "waiting the data.\n"
 		       "   The -F option will stress test the server.\n");
@@ -455,7 +459,8 @@ int main(int argc, char**argv)
 			addr4_send.sin_port = htons(SERVER_PORT);
 			addr4_recv.sin_family = AF_INET;
 			addr4_recv.sin_addr.s_addr = INADDR_ANY;
-			addr4_recv.sin_port = htons(CLIENT_PORT);
+			if (!tcp)
+				addr4_recv.sin_port = htons(CLIENT_PORT);
 			family = AF_INET;
 			addr_len = sizeof(addr4_send);
 			address = &addr4_recv.sin_addr;
@@ -469,7 +474,8 @@ int main(int argc, char**argv)
 		addr6_send.sin6_port = htons(SERVER_PORT);
 		addr6_recv.sin6_family = AF_INET6;
 		addr6_recv.sin6_addr = any;
-		addr6_recv.sin6_port = htons(CLIENT_PORT);
+		if (!tcp)
+			addr6_recv.sin6_port = htons(CLIENT_PORT);
 		family = AF_INET6;
 		addr_len = sizeof(addr6_send);
 		address = &addr6_recv.sin6_addr;
@@ -478,7 +484,8 @@ int main(int argc, char**argv)
 	addr_send->sa_family = family;
 	addr_recv->sa_family = family;
 
-	fd = socket(family, SOCK_DGRAM, IPPROTO_UDP);
+	fd = socket(family, tcp ? SOCK_STREAM : SOCK_DGRAM,
+		    tcp ? IPPROTO_TCP : IPPROTO_UDP);
 	if (fd < 0) {
 		perror("socket");
 		exit(-errno);
@@ -522,17 +529,49 @@ int main(int argc, char**argv)
 		}
 	}
 
+	ret = setsockopt(fd, SOL_SOCKET, SO_REUSEPORT,
+			 &optval, sizeof(optval));
+	if (ret < 0) {
+		perror("setsockopt");
+	}
+
 	ret = bind(fd, addr_recv, addr_len);
 	if (ret < 0) {
 		perror("bind");
 		exit(-errno);
 	}
 
+	if (tcp) {
+		ret = connect(fd, addr_send, addr_len);
+		if (ret < 0) {
+			perror("connect");
+			exit(-errno);
+		}
+	}
+
 again:
 	do {
+		int sent;
+
 		while (data[i].buf) {
-			ret = sendto(fd, data[i].buf, data[i].len, 0,
-				     addr_send, addr_len);
+			int pos = 0;
+			sent = 0;
+
+			if (tcp) {
+				pos = 0;
+
+				do {
+					ret = write(fd, &data[i].buf[pos],
+						    data[i].len - pos);
+					if (ret <= 0)
+						break;
+
+					sent += data[i].len;
+					pos += ret;
+				} while (sent < data[i].len);
+			} else
+				ret = sendto(fd, data[i].buf, data[i].len, 0,
+					     addr_send, addr_len);
 			if (ret < 0) {
 				perror("send");
 				goto out;
@@ -568,14 +607,31 @@ again:
 				goto out;
 			}
 
-			ret = recv(fd, buf, sizeof(buf), 0);
+			if (tcp) {
+				int received = 0;
+
+				pos = 0;
+
+				do {
+					ret = read(fd, buf + pos,
+						   sizeof(buf) - pos);
+					if (ret < 0)
+						break;
+
+					received += ret;
+					pos += ret;
+					ret = received;
+				} while (received < sent);
+			} else
+				ret = recv(fd, buf, sizeof(buf), 0);
 			if (ret <= 0) {
 				perror("recv");
 				ret = -EINVAL;
 				goto out;
 			}
 
-			reverse(buf, ret);
+			if (!tcp)
+				reverse(buf, ret);
 
 			if (data[i].len != ret ||
 			    memcmp(data[i].buf, buf, ret) != 0) {
