@@ -77,7 +77,6 @@ tinydtls-0.8.2/*.o
 tinydtls-0.8.2/aes/Makefile
 tinydtls-0.8.2/libtinydtls.a
 tinydtls-0.8.2/aes/*.o
-tinydtls-0.8.2/configure
 tinydtls-0.8.2/platform-specific/Makefile
 tinydtls-0.8.2/sha2/Makefile
 tinydtls-0.8.2/doc/Doxyfile
@@ -92,3 +91,5 @@ tinydtls-0.8.2/tests/dtls-server
 tinydtls-0.8.2/tests/prf-test
 tinydtls-0.8.2/ecc/Makefile
 tinydtls-0.8.2/tinydtls.h
+tinydtls-0.8.2/config.status
+tinydtls-0.8.2/doc/doxygen.out
