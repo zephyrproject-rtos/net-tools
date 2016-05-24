@@ -608,13 +608,19 @@ sigalarm_reset()
 }
 
 void
-ifconf(const char *tundev, const char *ipaddr)
+ifconf(const char *tundev, const char *ipaddr, int tap)
 {
 #ifdef linux
   if (timestamp) stamptime();
-  ssystem("ifconfig %s inet `hostname` up", tundev);
+  if (!tap) {
+	  ssystem("ifconfig %s inet `hostname` up", tundev);
+	  ssystem("ifconfig %s add %s", tundev, ipaddr);
+  } else {
+	  ssystem("ifconfig %s up", tundev);
+	  ssystem("ip -6 route add 2001:db8::/64 dev %s", tundev);
+	  ssystem("ip route add 192.0.2.0/24 dev %s", tundev);
+  }
   if (timestamp) stamptime();
-  ssystem("ifconfig %s add %s", tundev, ipaddr);
 
 /* radvd needs a link local address for routing */
 #if 0
@@ -623,7 +629,7 @@ ifconf(const char *tundev, const char *ipaddr)
 #elif 1
 /* Generate a link local address a la sixxs/aiccu */
 /* First a full parse, stripping off the prefix length */
-  {
+  if (!tap) {
     char lladdr[40];
     char c, *ptr=(char *)ipaddr;
     uint16_t digit,ai,a[8],cc,scc,i;
@@ -932,7 +938,7 @@ exit(1);
   signal(SIGTERM, sigcleanup);
   signal(SIGINT, sigcleanup);
   signal(SIGALRM, sigalarm);
-  ifconf(tundev, ipaddr);
+  ifconf(tundev, ipaddr, tap);
 
   while(1) {
     maxfd = 0;
