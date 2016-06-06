@@ -17,4 +17,13 @@ if [ `id -u` != 0 ]; then
     exit 2
 fi
 
-while [ 1 ]; do $DIR/tunslip6 -T -s `readlink /tmp/slip.dev` 2001:db8::1/64; done
+STOPPED=0
+trap ctrl_c INT TERM
+
+function ctrl_c() {
+    STOPPED=1
+}
+
+while [ $STOPPED -eq 0 ]; do
+    $DIR/tunslip6 -T -s `readlink /tmp/slip.dev` 2001:db8::1/64
+done
