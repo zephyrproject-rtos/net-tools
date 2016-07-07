@@ -406,7 +406,7 @@ int main(int argc, char**argv)
 	struct timeval tv = {};
 	int ifindex = -1, optval = 1;
 	void *address = NULL;
-	bool forever = false, help = false, tcp = false;
+	bool forever = false, help = false, tcp = false, do_reverse = false;
 
 	opterr = 0;
 
@@ -424,6 +424,9 @@ int main(int argc, char**argv)
 		case 't':
 			tcp = true;
 			break;
+		case 'r':
+			do_reverse = true;
+			break;
 		case 'h':
 			help = true;
 			break;
@@ -440,6 +443,8 @@ int main(int argc, char**argv)
 		       "multicast server address.\n");
 		printf("-e Do not quit, send packets forever\n");
 		printf("-t Use TCP, default is to use UDP only\n");
+		printf("-r Check data by reversing it (needed when checking "
+		       "legacy stack\n");
 		printf("-F (flood) option will prevent the client from "
 		       "waiting the data.\n"
 		       "   The -F option will stress test the server.\n");
@@ -630,7 +635,7 @@ again:
 				goto out;
 			}
 
-			if (!tcp)
+			if (!tcp && do_reverse)
 				reverse(buf, ret);
 
 			if (data[i].len != ret ||
