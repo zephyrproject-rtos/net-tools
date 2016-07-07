@@ -31,5 +31,5 @@ function ctrl_c() {
 mkdir -p $PID_DIR
 
 while [ $STOPPED -eq 0 ]; do
-    radvd -n -d 1 -C $DIR/radvd.conf -m stderr -p $PID_FILE -u root
+    radvd -n -C $DIR/radvd.conf -m stderr -p $PID_FILE -u root
 done
