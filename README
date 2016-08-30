@@ -1,0 +1,51 @@
+The comments and instructions below are for the new IP stack in Zephyr.
+For Contiki based uIP stack, see instructions in README.legacy file.
+
+Here are instructions how to communicate between Zephyr that is running
+inside Qemu, and host device that is running Linux.
+
+You need to run socat and tunslip to create a minimally working
+network setup.
+
+There are convenience scripts (loop-socat.sh and loop-slip-tap.sh) for
+running socat and tunslip6 processes. For running these, you need two
+terminals.
+
+Terminal 1:
+$ ./loop-socat.sh
+
+Terminal 2:
+$ sudo ./loop-slip-tap.sh
+
+After running these scripts you do not need to manually restart
+them when qemu process stops.
+
+In the Qemu side, you need to compile the kernel with proper config.
+Minimally you need these settings active in you project config file.
+
+CONFIG_NETWORKING=y
+CONFIG_NET_IPV6=y
+CONFIG_NET_IPV4=y
+CONFIG_NET_YAIP=y
+CONFIG_NET_UDP=y
+CONFIG_NET_LOG=y
+CONFIG_NET_SLIP=y
+CONFIG_SLIP_TAP=y
+CONFIG_SYS_LOG=y
+CONFIG_SYS_LOG_SHOW_COLOR=y
+CONFIG_NANO_TIMEOUTS=y
+
+After you have the loop scripts and Qemu running running you can communicate
+with the Zephyr.
+
+If your have echo-server running in the Qemu, then you can use the echo-client
+tool in net-tools directory to communicate with it.
+
+# ./echo-client -i tap0 2001:db8::1
+
+The IP stack responds to ping requests if properly configured.
+
+$ ping6 -I tap0 -c 1 2001:db8::1
+
+You can attach wireshark to tap0 interface to see what data is being
+transferred.
