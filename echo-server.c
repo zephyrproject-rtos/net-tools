@@ -38,6 +38,8 @@
 #define MAX_BUF_SIZE 1280	/* min IPv6 MTU, the actual data is smaller */
 #define MAX_TIMEOUT  3		/* in seconds */
 
+static bool do_reverse;
+
 static inline void reverse(unsigned char *buf, int len)
 {
 	int i, last = len - 1;
@@ -184,7 +186,8 @@ static int reply(int fd, unsigned char *buf, int buflen,
 }
 
 static int udp_receive_and_reply(fd_set *rfds, int fd_recv, int fd_send,
-				 unsigned char *buf, int buflen, int proto)
+				 unsigned char *buf, int buflen, int proto,
+				 bool do_reverse)
 {
 	if (FD_ISSET(fd_recv, rfds)) {
 		struct sockaddr_in6 from = { 0 };
@@ -196,7 +199,8 @@ static int udp_receive_and_reply(fd_set *rfds, int fd_recv, int fd_send,
 		if (ret < 0)
 			return ret;
 
-		reverse(buf, ret);
+		if (do_reverse)
+			reverse(buf, ret);
 
 		ret = reply(fd_send, buf, ret,
 			    (struct sockaddr *)&from, fromlen, proto);
@@ -382,16 +386,20 @@ int main(int argc, char**argv)
 
 	opterr = 0;
 
-	while ((c = getopt(argc, argv, "i:")) != -1) {
+	while ((c = getopt(argc, argv, "i:r")) != -1) {
 		switch (c) {
 		case 'i':
 			interface = optarg;
+			break;
+		case 'r':
+			do_reverse = true;
 			break;
 		}
 	}
 
 	if (!interface) {
-		printf("usage: %s -i <iface>\n", argv[0]);
+		printf("usage: %s [-r] -i <iface>\n", argv[0]);
+		printf("\t-r Reverse the sent UDP data.\n");
 		printf("\t-i Use this network interface.\n");
 		exit(-EINVAL);
 	}
@@ -549,22 +557,22 @@ int main(int argc, char**argv)
 
 		/* Unicast IPv4 */
 		if (udp_receive_and_reply(&rfds, fd4, fd4, buf, sizeof(buf),
-					  IPPROTO_UDP) < 0)
+					  IPPROTO_UDP, do_reverse) < 0)
 			break;
 
 		/* Unicast IPv6 */
 		if (udp_receive_and_reply(&rfds, fd6, fd6, buf, sizeof(buf),
-					  IPPROTO_UDP) < 0)
+					  IPPROTO_UDP, do_reverse) < 0)
 			break;
 
 		/* Multicast IPv4 */
 		if (udp_receive_and_reply(&rfds, fd4m, fd4, buf, sizeof(buf),
-					  IPPROTO_UDP) < 0)
+					  IPPROTO_UDP, do_reverse) < 0)
 			break;
 
 		/* Multicast IPv6 */
 		if (udp_receive_and_reply(&rfds, fd6m, fd6, buf, sizeof(buf),
-					  IPPROTO_UDP) < 0)
+					  IPPROTO_UDP, do_reverse) < 0)
 			break;
 
 		/* TCP IPv4 */
