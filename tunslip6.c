@@ -619,6 +619,7 @@ ifconf(const char *tundev, const char *ipaddr, int tap)
 	  ssystem("ifconfig %s up", tundev);
 	  ssystem("ip -6 route add 2001:db8::/64 dev %s", tundev);
 	  ssystem("ip route add 192.0.2.0/24 dev %s", tundev);
+	  ssystem("ip addr add 192.0.2.2/24 dev %s", tundev);
   }
   if (timestamp) stamptime();
 
