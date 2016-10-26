@@ -17,7 +17,7 @@
 STOPPED=0
 trap ctrl_c INT TERM
 
-function ctrl_c() {
+ctrl_c() {
     STOPPED=1
     killall coap-client
 }
