@@ -34,6 +34,7 @@ CONFIG_SLIP_TAP=y
 CONFIG_SYS_LOG=y
 CONFIG_SYS_LOG_SHOW_COLOR=y
 CONFIG_NANO_TIMEOUTS=y
+CONFIG_TEST_RANDOM_GENERATOR=y
 
 After you have the loop scripts and Qemu running running you can communicate
 with the Zephyr.
