@@ -21,7 +21,7 @@ After running these scripts you do not need to manually restart
 them when qemu process stops.
 
 In the Qemu side, you need to compile the kernel with proper config.
-Minimally you need these settings active in you project config file.
+Minimally you need these settings active in your project config file.
 
 CONFIG_NETWORKING=y
 CONFIG_NET_IPV6=y
@@ -50,3 +50,17 @@ $ ping6 -I tap0 -c 1 2001:db8::1
 
 You can attach wireshark to tap0 interface to see what data is being
 transferred.
+
+If building with CONFIG_NET_TCP=y in your project config file, it's possible
+to run the echo-server sample in Zephyr, and then test the TCP stack using
+the supplied tcptest.py script:
+
+$ ./tcptest.py tap0 2001:db8::1
+
+This script will send numbers to the echo-server program, read them back,
+and compare if it got the exact bytes back.  Transmission errors, timeouts,
+and time to get the response are all recorded and printed to the standard
+output.
+
+Be sure to use Python 3, as it requires a function from the socket module
+that's only available in this version (wrapper around if_nametoindex(3)).
