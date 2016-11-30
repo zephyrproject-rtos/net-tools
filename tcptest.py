@@ -88,7 +88,7 @@ for current_n in range(0, 2**32, 10):
     if len(rcvd_bytes) != len(current_n_bytes):
         rx_errors += 1
         log("Got back %d bytes instead of %d. Will send again" % (
-            rcvd_bytes, len(current_n_bytes)
+            len(rcvd_bytes), len(current_n_bytes)
         ))
         continue
 
