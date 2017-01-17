@@ -47,12 +47,12 @@ LIBCOAP_CFLAGS = -I$(LIBCOAP)/include -I$(LIBCOAP) -DWITH_POSIX
 LIBCOAP_LIB = $(LIBCOAP)/.libs/libcoap-1.a
 
 $(LIBCOAP_LIB):
-	(cd libcoap; ./autogen.sh; ./configure; make)
+	(cd libcoap; ./autogen.sh; ./configure --disable-documentation; make)
 
 .PHONY: libcoap
 libcoap: $(LIBCOAP_LIB)
 
-coap-client.o: coap-client.c libcoap
+coap-client.o: coap-client.c libcoap tinydtls
 	$(CC) -c -o $@ $(CFLAGS) $(TINYDTLS_CFLAGS) $(LIBCOAP_CFLAGS) coap-client.c
 
 coap-client: coap-client.o $(TINYDTLS_LIB) $(LIBCOAP_LIB)
