@@ -941,7 +941,7 @@ static int read_from_peer(struct dtls_context_t *ctx,
 			(struct client_data *)dtls_get_app_data(ctx);
 	coap_address_t addr;
 
-	printf("%s: read [%d] from peer %d bytes\n",
+	printf("%s: read [%u] from peer %zu bytes\n",
 	       data[user_data->index].description, user_data->index, read_len);
 
 	memcpy(&(addr.addr), &(session->addr), session->size);
@@ -998,7 +998,7 @@ static int send_to_peer(struct dtls_context_t *ctx,
 	 */
 	sleep_ms(200);
 
-	printf("Sending to peer encrypted data %p len %d\n", data, len);
+	printf("Sending to peer encrypted data %p len %zu\n", data, len);
 
 	return sendto(user_data->fd, data, len, 0,
 		      &session->addr.sa, session->size);
@@ -1216,7 +1216,7 @@ static coap_pdu_t *read_blocks(coap_context_t *coap_ctx,
 	coap_tid_t tid;
 
 	if (coap_get_data(received, &len, &databuf))
-		printf("Received: databuf %p len %d\n", databuf, len);
+		printf("Received: databuf %p len %zu\n", databuf, len);
 
 	if (COAP_OPT_BLOCK_MORE(block_opt)) {
 		printf("found the M bit, block size is %u, block nr. %u\n",
@@ -1287,7 +1287,7 @@ static bool check_mid(const unsigned char *databuf, int len,
 	else {
 		printf("FAIL:\n  received %d bytes\n>>>>\n%.*s\n<<<<\n", len,
 		       len, databuf);
-		printf(" expected %d bytes\n>>>>\n%s\n<<<<\n", strlen(buf), buf);
+		printf(" expected %zu bytes\n>>>>\n%s\n<<<<\n", strlen(buf), buf);
 		return false;
 	}
 }
@@ -1678,7 +1678,7 @@ int main(int argc, char**argv)
 		char addr_buf[INET6_ADDRSTRLEN];
 
 		memset(&ifr, 0, sizeof(ifr));
-		snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), interface);
+		snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", interface);
 
 		if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE,
 			       (void *)&ifr, sizeof(ifr)) < 0) {

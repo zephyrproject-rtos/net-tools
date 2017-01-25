@@ -528,7 +528,7 @@ static int read_from_peer(struct dtls_context_t *ctx,
 	struct client_data *user_data =
 			(struct client_data *)dtls_get_app_data(ctx);
 
-	printf("Read [%d] from peer %d bytes\n", user_data->index, read_len);
+	printf("Read [%d] from peer %zu bytes\n", user_data->index, read_len);
 
 	reverse(read_data, read_len);
 
@@ -538,7 +538,7 @@ static int read_from_peer(struct dtls_context_t *ctx,
 	if (data[user_data->index].expecting_reply &&
 	    (data[user_data->index].len != read_len ||
 	     memcmp(data[user_data->index].buf, read_data, read_len) != 0)) {
-		fprintf(stderr, "Check failed [%d] len %d\n",
+		fprintf(stderr, "Check failed [%d] len %zu\n",
 			user_data->index, read_len);
 		quit = true;
 	}
@@ -580,7 +580,7 @@ static int send_to_peer(struct dtls_context_t *ctx,
 	 */
 	sleep_ms(200);
 
-	printf("Sending to peer data %p len %d\n", data, len);
+	printf("Sending to peer data %p len %zu\n", data, len);
 	return sendto(user_data->fd, data, len, 0,
 		      &session->addr.sa, session->size);
 }
@@ -789,7 +789,7 @@ int main(int argc, char**argv)
 		struct ifreq ifr;
 
 		memset(&ifr, 0, sizeof(ifr));
-		snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), interface);
+		snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", interface);
 
 		if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE,
 			       (void *)&ifr, sizeof(ifr)) < 0) {

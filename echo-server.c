@@ -96,7 +96,7 @@ static int bind_device(int fd, const char *interface, void *addr, int len,
 	int ret, val = 1;
 
 	memset(&ifr, 0, sizeof(ifr));
-	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), interface);
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", interface);
 
 	if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE,
 		       (void *)&ifr, sizeof(ifr)) < 0) {
