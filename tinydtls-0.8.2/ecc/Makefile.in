@@ -44,7 +44,7 @@ ifeq ("@WITH_CONTIKI@", "1")
 include Makefile.contiki
 else
 ECC_OBJECTS:= $(patsubst %.c, %.o, $(ECC_SOURCES)) ecc_test.o
-PROGRAMS:= testecc testfield
+#PROGRAMS:= testecc testfield
 CPPFLAGS=@CPPFLAGS@
 CFLAGS=-Wall -std=c99 -pedantic @CFLAGS@ -DTEST_INCLUDE
 LDLIBS=@LIBS@
