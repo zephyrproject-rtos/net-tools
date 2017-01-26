@@ -181,6 +181,10 @@ serial_to_tun(FILE *inslip, int outfd)
 #ifdef linux
  after_fread:
 #endif
+  if(ret == -1 && errno == -EINTR) {
+    /* Can be QEMU or other restarting, retry */
+    ret = 0;
+  }
   if(ret == -1) {
     err(1, "serial_to_tun: read");
   }
@@ -267,8 +271,19 @@ serial_to_tun(FILE *inslip, int outfd)
             printf("\n");
           }
         }
-	if(write(outfd, uip.inbuf, inbufptr) != inbufptr) {
-	  err(1, "serial_to_tun: write");
+	unsigned count_errs = 0;
+	struct timespec ts = { .tv_sec = 0, .tv_nsec = 500000000 };
+	while(1) {
+	  if(write(outfd, uip.inbuf, inbufptr) == inbufptr)
+	    break;
+	  if(count_errs > 10) {
+	    err(1, "serial_to_tun: write");
+	    break;
+	  }
+	  count_errs++;
+	  if (0)
+	    fprintf(stderr, "DEBUG: retrying %d\n", count_errs);
+	  nanosleep(&ts, NULL);
 	}
       }
       inbufptr = 0;
@@ -552,6 +567,11 @@ tun_alloc(char *dev, int tap)
 void
 cleanup(void)
 {
+  if (ipaddr == NULL) {
+    /* no configuration was done in this case by ifconf, we let the
+     * user take care of it */
+    return;
+  }
 #ifndef __APPLE__
   if (timestamp) stamptime();
   ssystem("ifconfig %s down", tundev);
@@ -610,6 +630,10 @@ sigalarm_reset()
 void
 ifconf(const char *tundev, const char *ipaddr, int tap)
 {
+  if (ipaddr == NULL) {
+    /* No ipaddr; the user will do it manually */
+    return;
+  }
 #ifdef linux
   if (timestamp) stamptime();
   if (!tap) {
@@ -773,7 +797,7 @@ main(int argc, char **argv)
     case '?':
     case 'h':
     default:
-fprintf(stderr,"usage:  %s [options] ipaddress\n", prog);
+fprintf(stderr,"usage:  %s [options] [ipaddress]\n", prog);
 fprintf(stderr,"example: tunslip6 -L -v2 -s ttyUSB1 2001:db8::1/64\n");
 fprintf(stderr,"Options are:\n");
 #ifndef __APPLE__
@@ -806,10 +830,13 @@ exit(1);
   argc -= (optind - 1);
   argv += (optind - 1);
 
-  if(argc != 2 && argc != 3) {
-    err(1, "usage: %s [-B baudrate] [-H] [-L] [-s siodev] [-t tundev] [-T] [-v verbosity] [-d delay] [-a serveraddress] [-p serverport] ipaddress", prog);
+  if(argc > 3) {
+    err(1, "usage: %s [-B baudrate] [-H] [-L] [-s siodev] [-t tundev] [-T] [-v verbosity] [-d delay] [-a serveraddress] [-p serverport] [ipaddress]", prog);
   }
-  ipaddr = argv[1];
+  if (argc == 2) 
+    ipaddr = argv[1];
+  else
+    ipaddr = NULL;
 
   switch(baudrate) {
   case -2:
