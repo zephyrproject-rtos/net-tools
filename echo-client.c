@@ -30,7 +30,7 @@
 #include <unistd.h>
 
 #define SERVER_PORT  4242
-#define CLIENT_PORT  8484
+#define CLIENT_PORT  0
 #define MAX_BUF_SIZE 1280	/* min IPv6 MTU, the actual data is smaller */
 #define MAX_TIMEOUT  1		/* in seconds */
 
