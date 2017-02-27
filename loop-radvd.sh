@@ -21,11 +21,11 @@ PID_DIR=/var/run/radvd
 PID_FILE=$PID_DIR/radvd.pid
 
 if [ ! -f ./radvd.conf ]; then
-    if [ ! -f $ZEPHYR_BASE/net/ip/tools/radvd.conf ]; then
+    if [ ! -f $ZEPHYR_BASE/../net-tools/radvd.conf ]; then
 	echo "Cannot find radvd.conf file."
 	exit 1
     fi
-    DIR=$ZEPHYR_BASE/net/ip/tools
+    DIR=$ZEPHYR_BASE/../net-tools
 else
     DIR=.
 fi
