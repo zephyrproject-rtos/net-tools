@@ -529,11 +529,14 @@ devopen(const char *dev, int flags)
 #include <linux/if_tun.h>
 
 int
-tun_alloc(char *dev, int tap)
+tun_alloc(char *dev, int tap, int make)
 {
   struct ifreq ifr;
   int fd, err;
 
+  if (!make)
+    return devopen(dev, O_RDWR);
+  
   if( (fd = open("/dev/net/tun", O_RDWR)) < 0 ) {
     return -1;
   }
@@ -558,7 +561,7 @@ tun_alloc(char *dev, int tap)
 }
 #else
 int
-tun_alloc(char *dev, int tap)
+tun_alloc(char *dev, int tap, int make)
 {
   return devopen(dev, O_RDWR);
 }
@@ -737,12 +740,13 @@ main(int argc, char **argv)
   const char *prog;
   int baudrate = -2;
   int tap = 0;
+  int make = 1;
   slipfd = 0;
 
   prog = argv[0];
   setvbuf(stdout, NULL, _IOLBF, 0); /* Line buffered output. */
 
-  while((c = getopt(argc, argv, "B:HLhs:t:v::d::a:p:T")) != -1) {
+  while((c = getopt(argc, argv, "B:HxLhs:t:v::d::a:p:T")) != -1) {
     switch(c) {
     case 'B':
       baudrate = atoi(optarg);
@@ -754,6 +758,10 @@ main(int argc, char **argv)
 
     case 'L':
       timestamp=1;
+      break;
+
+    case 'x':
+      make=0;
       break;
 
     case 's':
@@ -809,6 +817,7 @@ fprintf(stderr," -H             Hardware CTS/RTS flow control (default disabled)
 fprintf(stderr," -L             Log output format (adds time stamps)\n");
 fprintf(stderr," -s siodev      Serial device (default /dev/ttyUSB0)\n");
 fprintf(stderr," -T             Make tap interface (default is tun interface)\n");
+fprintf(stderr," -x             Reuse tun device instead of creating a new one\n");
 fprintf(stderr," -t tundev      Name of interface (default tap0 or tun0)\n");
 fprintf(stderr," -v[level]      Verbosity level\n");
 fprintf(stderr,"    -v0         No messages\n");
@@ -956,7 +965,7 @@ exit(1);
   inslip = fdopen(slipfd, "r");
   if(inslip == NULL) err(1, "main: fdopen");
 
-  tunfd = tun_alloc(tundev, tap);
+  tunfd = tun_alloc(tundev, tap, make);
   if(tunfd == -1) err(1, "main: open");
   if (timestamp) stamptime();
   fprintf(stderr, "opened %s device ``/dev/%s''\n",
