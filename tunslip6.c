@@ -64,6 +64,8 @@ int slipfd = 0;
 uint16_t basedelay=0,delaymsec=0;
 uint32_t startsec,startmsec,delaystartsec,delaystartmsec;
 int timestamp = 0, flowcontrol=0;
+unsigned int vnet_hdr=0;
+#define VNET_HDR_LENGTH 10
 
 int ssystem(const char *fmt, ...)
      __attribute__((__format__ (__printf__, 1, 2)));
@@ -158,9 +160,10 @@ is_sensible_string(const unsigned char *s, int len)
 void
 serial_to_tun(FILE *inslip, int outfd)
 {
-  static union {
+  static struct {
+    unsigned char vnet_header[VNET_HDR_LENGTH];
     unsigned char inbuf[2000];
-  } uip;
+  } uip = { .vnet_header = { 0 } };
   static int inbufptr = 0;
   int ret,i;
   unsigned char c;
@@ -259,9 +262,21 @@ serial_to_tun(FILE *inslip, int outfd)
           if (verbose>4) {
 #if WIRESHARK_IMPORT_FORMAT
             printf("0000");
-	        for(i = 0; i < inbufptr; i++) printf(" %02x",uip.inbuf[i]);
+	    if (vnet_hdr) {
+	      for(i = 0; i < sizeof(uip.vnet_header); i++)
+		printf(" %02x",uip.vnet_header[i]);
+	    }
+	    for(i = 0; i < inbufptr; i++)
+	      printf(" %02x",uip.inbuf[i]);
 #else
             printf("         ");
+	    if (vnet_hdr) {
+	      for(i = 0; i < sizeof(uip.vnet_header); i++) {
+		printf("%02x", uip.vnet_header[i]);
+		if((i & 3) == 3) printf(" ");
+		if((i & 15) == 15) printf("\n         ");
+	      }
+	    }
             for(i = 0; i < inbufptr; i++) {
               printf("%02x", uip.inbuf[i]);
               if((i & 3) == 3) printf(" ");
@@ -273,8 +288,12 @@ serial_to_tun(FILE *inslip, int outfd)
         }
 	unsigned count_errs = 0;
 	struct timespec ts = { .tv_sec = 0, .tv_nsec = 500000000 };
+	size_t total_size = inbufptr;
+	if (vnet_hdr)
+	  total_size += sizeof(uip.vnet_header);
+
 	while(1) {
-	  if(write(outfd, uip.inbuf, inbufptr) == inbufptr)
+	  if(write(outfd, (void *) &uip, total_size) == total_size)
 	    break;
 	  if(count_errs > 10) {
 	    err(1, "serial_to_tun: write");
@@ -421,8 +440,14 @@ write_to_serial(int outfd, void *inbuf, int len)
    * really necessary.
    */
   /* slip_send(outfd, SLIP_END); */
+  if (vnet_hdr)  {
+    /* We don't even parse the VNET header, we just skip it */
+    i = VNET_HDR_LENGTH;
+  } else {
+    i = 0;
+  }
 
-  for(i = 0; i < len; i++) {
+  for(; i < len; i++) {
     switch(p[i]) {
     case SLIP_END:
       slip_send(outfd, SLIP_ESC);
@@ -745,7 +770,7 @@ main(int argc, char **argv)
   prog = argv[0];
   setvbuf(stdout, NULL, _IOLBF, 0); /* Line buffered output. */
 
-  while((c = getopt(argc, argv, "B:HxLhs:t:v::d::a:p:T")) != -1) {
+  while((c = getopt(argc, argv, "B:HNxLhs:t:v::d::a:p:T")) != -1) {
     switch(c) {
     case 'B':
       baudrate = atoi(optarg);
@@ -761,6 +786,10 @@ main(int argc, char **argv)
 
     case 'x':
       make=0;
+      break;
+
+    case 'N':
+      vnet_hdr=1;
       break;
 
     case 's':
@@ -817,6 +846,7 @@ fprintf(stderr," -L             Log output format (adds time stamps)\n");
 fprintf(stderr," -s siodev      Serial device (default /dev/ttyUSB0)\n");
 fprintf(stderr," -T             Make tap interface (default is tun interface)\n");
 fprintf(stderr," -x             Reuse tun device instead of creating a new one\n");
+fprintf(stderr," -N             add (and remove) a VNET header\n");
 fprintf(stderr," -t tundev      Name of interface (default tap0 or tun0)\n");
 fprintf(stderr," -v[level]      Verbosity level\n");
 fprintf(stderr,"    -v0         No messages\n");
@@ -839,7 +869,7 @@ exit(1);
   argv += (optind - 1);
 
   if(argc > 3) {
-    err(1, "usage: %s [-B baudrate] [-H] [-L] [-s siodev] [-t tundev] [-T] [-v verbosity] [-d delay] [-a serveraddress] [-p serverport] [ipaddress]", prog);
+    err(1, "usage: %s [-B baudrate] [-N] [-x] [-H] [-L] [-s siodev] [-t tundev] [-T] [-v verbosity] [-d delay] [-a serveraddress] [-p serverport] [ipaddress]", prog);
   }
   if (argc == 2) 
     ipaddr = argv[1];
