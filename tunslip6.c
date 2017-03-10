@@ -317,7 +317,6 @@ serial_to_tun(FILE *inslip, int outfd)
         if(is_sensible_string(uip.inbuf, inbufptr)) {
           if (timestamp) stamptime();
           fwrite(uip.inbuf, inbufptr, 1, stdout);
-          inbufptr=0;
         }
       }
     } else if(verbose==4) {
