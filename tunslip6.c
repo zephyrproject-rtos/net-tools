@@ -261,10 +261,11 @@ serial_to_tun(FILE *inslip, int outfd)
       } else {
         if(verbose>2) {
           if (timestamp) stamptime();
-          printf("Packet from SLIP of length %d - write TUN\n", inbufptr);
+          printf("%s: Packet from SLIP of length %d - write TUN\n",
+		 tundev, inbufptr);
           if (verbose>4) {
 #if WIRESHARK_IMPORT_FORMAT
-            printf("0000");
+            printf("%s: 0000", tundev);
 	    if (vnet_hdr) {
 	      for(i = 0; i < sizeof(uip.vnet_header); i++)
 		printf(" %02x",uip.vnet_header[i]);
@@ -277,13 +278,13 @@ serial_to_tun(FILE *inslip, int outfd)
 	      for(i = 0; i < sizeof(uip.vnet_header); i++) {
 		printf("%02x", uip.vnet_header[i]);
 		if((i & 3) == 3) printf(" ");
-		if((i & 15) == 15) printf("\n         ");
+		if((i & 15) == 15) printf("\n%s:          ", tundev);
 	      }
 	    }
             for(i = 0; i < inbufptr; i++) {
               printf("%02x", uip.inbuf[i]);
               if((i & 3) == 3) printf(" ");
-              if((i & 15) == 15) printf("\n         ");
+              if((i & 15) == 15) printf("\n%s:          ", tundev);
             }
 #endif
             printf("\n");
@@ -422,17 +423,17 @@ write_to_serial(int outfd, void *inbuf, int len)
 
   if(verbose>2) {
     if (timestamp) stamptime();
-    printf("Packet from TUN of length %d - write SLIP\n", len);
+    printf("%s: Packet from TUN of length %d - write SLIP\n", tundev, len);
     if (verbose>4) {
 #if WIRESHARK_IMPORT_FORMAT
-      printf("0000");
+      printf("%s: 0000", tundev);
 	  for(i = 0; i < len; i++) printf(" %02x", p[i]);
 #else
       printf("         ");
       for(i = 0; i < len; i++) {
         printf("%02x", p[i]);
         if((i & 3) == 3) printf(" ");
-        if((i & 15) == 15) printf("\n         ");
+        if((i & 15) == 15) printf("\n%s:         ", tundev);
       }
 #endif
       printf("\n");
