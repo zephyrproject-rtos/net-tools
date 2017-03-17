@@ -58,6 +58,7 @@
 #include <err.h>
 
 int verbose = 1;
+int make = 1;
 const char *ipaddr;
 const char *netmask;
 int slipfd = 0;
@@ -214,12 +215,14 @@ serial_to_tun(FILE *inslip, int outfd)
 	  macs[pos] = '\0';
 //	  printf("*** Gateway's MAC address: %s\n", macs);
 	  fprintf(stderr,"*** Gateway's MAC address: %s\n", macs);
-          if (timestamp) stamptime();
-	  ssystem("ifconfig %s down", tundev);
-          if (timestamp) stamptime();
-	  ssystem("ifconfig %s hw ether %s", tundev, &macs[6]);
-          if (timestamp) stamptime();
-	  ssystem("ifconfig %s up", tundev);
+	  if (make) {
+	    if (timestamp) stamptime();
+	    ssystem("ifconfig %s down", tundev);
+	    if (timestamp) stamptime();
+	    ssystem("ifconfig %s hw ether %s", tundev, &macs[6]);
+	    if (timestamp) stamptime();
+	    ssystem("ifconfig %s up", tundev);
+	  }
 	}
       } else if(uip.inbuf[0] == '?') {
 	if(uip.inbuf[1] == 'P') {
@@ -600,19 +603,21 @@ cleanup(void)
     return;
   }
 #ifndef __APPLE__
-  if (timestamp) stamptime();
-  ssystem("ifconfig %s down", tundev);
+  if (make) {
+    if (timestamp) stamptime();
+    ssystem("ifconfig %s down", tundev);
 #ifndef linux
-  ssystem("sysctl -w net.ipv6.conf.all.forwarding=1");
+    ssystem("sysctl -w net.ipv6.conf.all.forwarding=1");
 #endif
-  /* ssystem("arp -d %s", ipaddr); */
-  if (timestamp) stamptime();
-  ssystem("netstat -nr"
-	  " | awk '{ if ($2 == \"%s\") print \"route delete -net \"$1; }'"
-	  " | sh",
-	  tundev);
+    /* ssystem("arp -d %s", ipaddr); */
+    if (timestamp) stamptime();
+    ssystem("netstat -nr"
+	    " | awk '{ if ($2 == \"%s\") print \"route delete -net \"$1; }'"
+	    " | sh",
+	    tundev);
+  }
 #else
-  {
+  if (make) {
     char *  itfaddr = strdup(ipaddr);
     char *  prefix = index(itfaddr, '/');
     if (timestamp) stamptime();
@@ -657,6 +662,8 @@ sigalarm_reset()
 void
 ifconf(const char *tundev, const char *ipaddr, int tap)
 {
+  if (!make)
+    return;
   if (ipaddr == NULL) {
     /* No ipaddr; the user will do it manually */
     return;
@@ -764,7 +771,6 @@ main(int argc, char **argv)
   const char *prog;
   int baudrate = -2;
   int tap = 0;
-  int make = 1;
   slipfd = 0;
 
   prog = argv[0];
@@ -845,7 +851,8 @@ fprintf(stderr," -H             Hardware CTS/RTS flow control (default disabled)
 fprintf(stderr," -L             Log output format (adds time stamps)\n");
 fprintf(stderr," -s siodev      Serial device (default /dev/ttyUSB0)\n");
 fprintf(stderr," -T             Make tap interface (default is tun interface)\n");
-fprintf(stderr," -x             Reuse tun device instead of creating a new one\n");
+fprintf(stderr," -x             Reuse tun device instead of creating a new one;\n"
+               "                likewise do not attempt to configure the device\n");
 fprintf(stderr," -N             add (and remove) a VNET header\n");
 fprintf(stderr," -t tundev      Name of interface (default tap0 or tun0)\n");
 fprintf(stderr," -v[level]      Verbosity level\n");
