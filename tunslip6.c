@@ -297,8 +297,13 @@ serial_to_tun(FILE *inslip, int outfd)
 	  total_size += sizeof(uip.vnet_header);
 
 	while(1) {
-	  if(write(outfd, (void *) &uip, total_size) == total_size)
-	    break;
+	  if (vnet_hdr) {
+	    if (write(outfd, (void *) &uip, total_size) == total_size)
+	      break;
+	  } else {
+	    if(write(outfd, (void *) uip.inbuf, total_size) == total_size)
+	      break;
+	  }
 	  if(count_errs > 10) {
 	    err(1, "serial_to_tun: write");
 	    break;
