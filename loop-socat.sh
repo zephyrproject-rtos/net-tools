@@ -24,6 +24,9 @@ ctrl_c() {
     STOPPED=1
 }
 
+# If this file entry already exists, socat may complain
+rm -f /tmp/slip.sock
+
 while [ $STOPPED -eq 0 ]; do
     socat PTY,link=/tmp/slip.dev UNIX-LISTEN:/tmp/slip.sock
 done
