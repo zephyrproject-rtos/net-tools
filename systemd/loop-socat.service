@@ -1,0 +1,10 @@
+[Unit]
+Description=Loops socat for Zephyr QEMU networking
+
+[Service]
+User=zephyr
+Group=zephyr
+ExecStart=/home/zephyr/net-tools/loop-socat.sh
+
+[Install]
+WantedBy=multi-user.target
