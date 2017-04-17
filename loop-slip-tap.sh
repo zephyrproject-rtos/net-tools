@@ -40,5 +40,5 @@ ctrl_c() {
 }
 
 while [ $STOPPED -eq 0 ]; do
-    $DIR/tunslip6 -T -s `readlink /tmp/slip.dev` 2001:db8::1/64
+    $DIR/tunslip6 -T -s `readlink /tmp/slip.dev` 2001:db8::1/64 $@
 done
