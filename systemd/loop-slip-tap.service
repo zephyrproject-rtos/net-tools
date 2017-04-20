@@ -1,0 +1,12 @@
+[Unit]
+Description=Creates tap0 for Zephyr QEMU networking
+Requires=loop-socat.service
+After=loop-socat.service
+
+[Service]
+Environment=ZEPHYR_BASE=/home/zephyr/z
+ExecStart=/home/zephyr/net-tools/loop-slip-tap.sh -v5
+
+[Install]
+Wants=loop-socat.service
+WantedBy=multi-user.target
