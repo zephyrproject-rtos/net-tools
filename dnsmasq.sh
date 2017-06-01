@@ -1,1 +1,3 @@
-dnsmasq -C dnsmasq.conf -d
+#!/bin/sh
+
+exec dnsmasq -C dnsmasq.conf -d
