@@ -42,6 +42,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
 #include <unistd.h>
 #include <errno.h>
@@ -62,16 +63,24 @@ int make = 1;
 const char *ipaddr;
 const char *netmask;
 int slipfd = 0;
+FILE *inslip = NULL;
 uint16_t basedelay=0,delaymsec=0;
 uint32_t startsec,startmsec,delaystartsec,delaystartmsec;
 int timestamp = 0, flowcontrol=0;
 unsigned int vnet_hdr=0;
+const char *siodev = NULL;
+const char *host = NULL;
+const char *port = NULL;
 #define VNET_HDR_LENGTH 10
 
 int ssystem(const char *fmt, ...)
      __attribute__((__format__ (__printf__, 1, 2)));
 void write_to_serial(int outfd, void *inbuf, int len);
 
+int devopen(const char *dev, int flags);
+void stty_telos(int fd);
+
+int get_slipfd();
 void slip_send(int fd, unsigned char c);
 void slip_send_char(int fd, unsigned char c);
 
@@ -171,7 +180,10 @@ serial_to_tun(FILE *inslip, int outfd)
 
 #ifdef linux
   ret = fread(&c, 1, 1, inslip);
-  if(ret == -1 || ret == 0) err(1, "serial_to_tun: read");
+  if(ret == -1 || ret == 0) {
+    if (get_slipfd()) return;
+    err(1, "serial_to_tun: read");
+  }
   goto after_fread;
 #endif
 
@@ -363,6 +375,115 @@ serial_to_tun(FILE *inslip, int outfd)
 unsigned char slip_buf[2000];
 int slip_end, slip_begin;
 
+int
+get_slipfd()
+{
+  const int start_i = 20;
+  int status, i, fd = -1;
+  struct timeval sleep_for = {
+    .tv_sec = 0,       /* seconds */
+    .tv_usec = 200000  /* microseconds */
+  };
+
+  /* Try to acquire slipfd a few times */
+  for (i = start_i; i > 0; --i) {
+    if (i != start_i) {
+      select(0, NULL, NULL, NULL, &sleep_for);
+    }
+
+    if(host != NULL) {
+      struct addrinfo hints, *servinfo, *p;
+      int rv;
+      char s[INET6_ADDRSTRLEN];
+
+      if(port == NULL) {
+        port = "60001";
+      }
+
+      memset(&hints, 0, sizeof hints);
+      hints.ai_family = AF_UNSPEC;
+      hints.ai_socktype = SOCK_STREAM;
+
+      if((rv = getaddrinfo(host, port, &hints, &servinfo)) != 0) {
+        fprintf(stderr, "getaddrinfo: %s", gai_strerror(rv));
+        continue;
+      }
+
+      /* loop through all the results and connect to the first we can */
+      for(p = servinfo; p != NULL; p = p->ai_next) {
+        if((fd = socket(p->ai_family, p->ai_socktype,
+                            p->ai_protocol)) == -1) {
+          perror("client: socket");
+          continue;
+        }
+
+        if(connect(fd, p->ai_addr, p->ai_addrlen) == -1) {
+          close(fd);
+          perror("client: connect");
+          continue;
+        }
+        break;
+      }
+
+      if(p == NULL) {
+        fprintf(stderr, "can't connect to ``%s:%s''\n", host, port);
+        continue;
+      }
+
+      fcntl(fd, F_SETFL, O_NONBLOCK);
+
+      inet_ntop(p->ai_family, get_in_addr((struct sockaddr *)p->ai_addr),
+                s, sizeof(s));
+      fprintf(stderr, "slip connected to ``%s:%s''\n", s, port);
+
+      /* all done with this structure */
+      freeaddrinfo(servinfo);
+
+    } else {
+      if(siodev != NULL) {
+        fd = devopen(siodev, O_RDWR | O_NONBLOCK);
+        if(fd == -1) {
+          fprintf(stderr, "can't open siodev ``%s''\n", siodev);
+          continue;
+        }
+      } else {
+        static const char *siodevs[] = {
+          "ttyUSB0", "cuaU0", "ucom0" /* linux, fbsd6, fbsd5 */
+        };
+        int i;
+        for(i = 0; i < 3; i++) {
+          siodev = siodevs[i];
+          fd = devopen(siodev, O_RDWR | O_NONBLOCK);
+          if(fd != -1) {
+            break;
+          }
+        }
+        if(fd == -1) {
+          fprintf(stderr, "can't open siodev\n");
+          continue;
+        }
+      }
+      if (timestamp) stamptime();
+      fprintf(stderr, "********SLIP started on ``/dev/%s''\n", siodev);
+      stty_telos(fd);
+    }
+
+    slip_send(fd, SLIP_END);
+    inslip = fdopen(fd, "r");
+    if(inslip == NULL) {
+      printf("get_slipfd: fdopen failed\n");
+      continue;
+    }
+
+    slipfd = fd;
+
+    printf("slipfd and inslip reopened\n");
+    return 1;
+  }
+
+  return 0;
+}
+
 void
 slip_send_char(int fd, unsigned char c)
 {
@@ -406,9 +527,11 @@ slip_flushbuf(int fd)
     return;
   }
 
+slip_flushbuf_try_again:
   n = write(fd, slip_buf + slip_begin, (slip_end - slip_begin));
 
   if(n == -1 && errno != EAGAIN) {
+    if (get_slipfd()) goto slip_flushbuf_try_again;
     err(1, "slip_flushbuf write failed");
   } else if(n == -1) {
     PROGRESS("Q");		/* Outqueueis full! */
@@ -545,15 +668,37 @@ stty_telos(int fd)
 }
 
 int
+devopen_readlink(const char *dev, int flags)
+{
+  int fd = open(dev, flags);
+  /* Failed to open, maybe its a symlink? Try readlink. */
+  if (fd < 0) {
+    const int buf_size = 255;
+    char buf[buf_size];
+    int i;
+    i = readlink(dev, buf, buf_size);
+    if (i < 0 || i >= buf_size) {
+      return fd; /* We failed to readlink, return original error code. */
+    }
+    buf[i] = '\0';
+    if (verbose > 2) {
+      printf("Trying to open: '%s'\n", buf);
+    }
+    return open(buf, flags);
+  }
+  return fd;
+}
+
+int
 devopen(const char *dev, int flags)
 {
   if (dev[0] != '/') {
 	  char t[1024];
 	  strcpy(t, "/dev/");
 	  strncat(t, dev, sizeof(t) - 5);
-	  return open(t, flags);
+	  return devopen_readlink(t, flags);
   } else {
-	  return open(dev, flags);
+	  return devopen_readlink(dev, flags);
   }
 }
 
@@ -770,10 +915,6 @@ main(int argc, char **argv)
   int tunfd, maxfd;
   int ret;
   fd_set rset, wset;
-  FILE *inslip;
-  const char *siodev = NULL;
-  const char *host = NULL;
-  const char *port = NULL;
   const char *prog;
   int baudrate = -2;
   int tap = 0;
@@ -931,81 +1072,8 @@ exit(1);
       strcpy(tundev, "tun0");
     }
   }
-  if(host != NULL) {
-    struct addrinfo hints, *servinfo, *p;
-    int rv;
-    char s[INET6_ADDRSTRLEN];
 
-    if(port == NULL) {
-      port = "60001";
-    }
-
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    if((rv = getaddrinfo(host, port, &hints, &servinfo)) != 0) {
-      err(1, "getaddrinfo: %s", gai_strerror(rv));
-    }
-
-    /* loop through all the results and connect to the first we can */
-    for(p = servinfo; p != NULL; p = p->ai_next) {
-      if((slipfd = socket(p->ai_family, p->ai_socktype,
-                          p->ai_protocol)) == -1) {
-        perror("client: socket");
-        continue;
-      }
-
-      if(connect(slipfd, p->ai_addr, p->ai_addrlen) == -1) {
-        close(slipfd);
-        perror("client: connect");
-        continue;
-      }
-      break;
-    }
-
-    if(p == NULL) {
-      err(1, "can't connect to ``%s:%s''", host, port);
-    }
-
-    fcntl(slipfd, F_SETFL, O_NONBLOCK);
-
-    inet_ntop(p->ai_family, get_in_addr((struct sockaddr *)p->ai_addr),
-              s, sizeof(s));
-    fprintf(stderr, "slip connected to ``%s:%s''\n", s, port);
-
-    /* all done with this structure */
-    freeaddrinfo(servinfo);
-
-  } else {
-    if(siodev != NULL) {
-      slipfd = devopen(siodev, O_RDWR | O_NONBLOCK);
-      if(slipfd == -1) {
-	err(1, "can't open siodev ``%s''", siodev);
-      }
-    } else {
-      static const char *siodevs[] = {
-        "ttyUSB0", "cuaU0", "ucom0" /* linux, fbsd6, fbsd5 */
-      };
-      int i;
-      for(i = 0; i < 3; i++) {
-        siodev = siodevs[i];
-        slipfd = devopen(siodev, O_RDWR | O_NONBLOCK);
-        if(slipfd != -1) {
-          break;
-        }
-      }
-      if(slipfd == -1) {
-        err(1, "can't open siodev");
-      }
-    }
-    if (timestamp) stamptime();
-    fprintf(stderr, "********SLIP started on ``/dev/%s''\n", siodev);
-    stty_telos(slipfd);
-  }
-  slip_send(slipfd, SLIP_END);
-  inslip = fdopen(slipfd, "r");
-  if(inslip == NULL) err(1, "main: fdopen");
+  get_slipfd();
 
   tunfd = tun_alloc(tundev, tap, make);
   if(tunfd == -1) err(1, "main: open");
