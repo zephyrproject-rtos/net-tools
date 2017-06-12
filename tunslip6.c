@@ -464,7 +464,11 @@ get_slipfd()
         }
       }
       if (timestamp) stamptime();
-      fprintf(stderr, "********SLIP started on ``/dev/%s''\n", siodev);
+      if (siodev[0] != '/') {
+        fprintf(stderr, "********SLIP started on ``/dev/%s''\n", siodev);
+      } else {
+        fprintf(stderr, "********SLIP started on ``%s''\n", siodev);
+      }
       stty_telos(fd);
     }
 
