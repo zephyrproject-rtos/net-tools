@@ -138,15 +138,15 @@ static int receive(int fd, unsigned char *buf, int buflen,
 
 	if (proto == IPPROTO_UDP) {
 		ret = recvfrom(fd, buf, buflen, 0, addr, addrlen);
-		if (ret <= 0) {
+		if (ret < 0) {
 			perror("recv");
-			return -EINVAL;
+			return ret;
 		}
 	} else if (proto == IPPROTO_TCP) {
 		ret = read(fd, buf, buflen);
 		if (ret < 0) {
 			perror("read");
-			return -EINVAL;
+			return ret;
 		}
 	} else {
 		printf("Invalid protocol %d\n", proto);
@@ -368,7 +368,8 @@ extern char *optarg;
  */
 int main(int argc, char**argv)
 {
-	int c, ret, fd4, fd6, fd4m, fd6m, tcp4, tcp6, i = 0, timeout = 0;
+	int c, ret, fd4 = 0, fd6 = 0, fd4m = 0, fd6m = 0, tcp4 = 0, tcp6 = 0,
+		i = 0, timeout = 0;
 	int port = SERVER_PORT;
 	int accepted4 = -1, accepted6 = -1;
 	struct sockaddr_in6 addr6_recv = { 0 }, maddr6 = { 0 };
@@ -444,6 +445,20 @@ int main(int argc, char**argv)
 	memcpy(&maddr4.sin_addr, &mcast4_addr, sizeof(struct in_addr));
 	maddr4.sin_family = AF_INET;
 	maddr4.sin_port = htons(port);
+
+restart:
+	if (fd4)
+		close(fd4);
+	if (fd6)
+		close(fd6);
+	if (fd4m)
+		close(fd4m);
+	if (fd6m)
+		close(fd6m);
+	if (tcp4)
+		close(tcp4);
+	if (tcp6)
+		close(tcp6);
 
 	fd4 = get_socket(AF_INET, IPPROTO_UDP);
 	fd6 = get_socket(AF_INET6, IPPROTO_UDP);
@@ -563,44 +578,42 @@ int main(int argc, char**argv)
 		/* Unicast IPv4 */
 		if (udp_receive_and_reply(&rfds, fd4, fd4, buf, sizeof(buf),
 					  IPPROTO_UDP, do_reverse) < 0)
-			break;
+			goto restart;
 
 		/* Unicast IPv6 */
 		if (udp_receive_and_reply(&rfds, fd6, fd6, buf, sizeof(buf),
 					  IPPROTO_UDP, do_reverse) < 0)
-			break;
+			goto restart;
 
 		/* Multicast IPv4 */
 		if (udp_receive_and_reply(&rfds, fd4m, fd4, buf, sizeof(buf),
 					  IPPROTO_UDP, do_reverse) < 0)
-			break;
+			goto restart;
 
 		/* Multicast IPv6 */
 		if (udp_receive_and_reply(&rfds, fd6m, fd6, buf, sizeof(buf),
 					  IPPROTO_UDP, do_reverse) < 0)
-			break;
+			goto restart;
 
 		/* TCP IPv4 */
 		ret = tcp_receive_and_reply(&rfds, &errfds,
 					    accepted4, accepted4,
 					    buf, sizeof(buf),
 					    IPPROTO_TCP);
-		if (ret < 0) {
-			break;
-		} else if (ret == 0) {
+		if (ret < 0)
+			goto restart;
+		else if (ret == 0)
 			accepted4 = -1;
-		}
 
 		/* TCP IPv6 */
 		ret = tcp_receive_and_reply(&rfds, &errfds,
 					    accepted6, accepted6,
 					    buf, sizeof(buf),
 					    IPPROTO_TCP);
-		if (ret < 0) {
-			break;
-		} else if (ret == 0) {
+		if (ret < 0)
+			goto restart;
+		else if (ret == 0)
 			accepted6 = -1;
-		}
 	}
 
 	close(fd4);
