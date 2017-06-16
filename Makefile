@@ -1,10 +1,7 @@
-all: tunslip6 tunslip echo-client echo-server monitor_15_4 coap-client dtls-client dtls-server
+all: tunslip6 echo-client echo-server monitor_15_4 coap-client dtls-client dtls-server
 
 tunslip6: tunslip6.o
 	$(CC) -o $@ $(CFLAGS) $(LIBS) tunslip6.c
-
-tunslip: tunslip.o
-	$(CC) -o $@ $(CFLAGS) $(LIBS) tunslip.c
 
 echo-client: echo-client.o
 	$(CC) -o $@ $(CFLAGS) $(LIBS) echo-client.c
