@@ -64,3 +64,65 @@ output.
 
 Be sure to use Python 3, as it requires a function from the socket module
 that's only available in this version (wrapper around if_nametoindex(3)).
+
+
+Using encrypted SSL link with echo-* programs
+=============================================
+
+Install stunnel
+
+Fedora:
+# dnf install stunnel
+
+Ubuntu:
+# apt-get install stunnel4 -y
+
+Finally run the stunnel script in Linux
+$ ./stunnel.sh
+
+And connect echo-client to this SSL tunnel (note that the IP address
+is the address of Linux host where the tunnel end point is located).
+
+# ./echo-client -p 4243 2001:db8::2 -t
+
+If you are running echo-client in Zephyr QEMU, then run echo-server like
+this:
+
+# ./echo-server -p 4244 -i tap0
+
+
+If you want to re-create the certificates in echo-server and echo-client in
+Zephyr net samples, then they can be created like this (note that you do not
+need to do this as the certs have been prepared already in echo-server and
+echo-client sample sources):
+
+$ openssl genrsa -out echo-apps-key.pem 2048
+$ openssl req -new -x509 -key echo-apps-key.pem -out echo-apps-cert.pem \
+	-days 10000 -subj '/CN=localhost'
+
+The cert that is to be embedded into test_certs.h in echo-server and
+echo-client, can be generated like this:
+
+$ openssl x509 -in echo-apps-cert.pem -outform DER | \
+	hexdump -e '8/1 "0x%02x, " "\n"' | sed 's/0x  ,//g'
+
+The private key to be embedded into test_certs.h in echo-server can be
+generated like this:
+
+$ openssl pkcs8 -topk8 -inform PEM -outform DER -nocrypt \
+	-in echo-apps-key.pem | hexdump -e '8/1 "0x%02x, " "\n"' | \
+	sed 's/0x  ,//g'
+
+
+TLS connecitivity errors
+========================
+
+If you see this error print in zephyr console
+
+[net/app] [ERR] _net_app_ssl_mainloop: Closing connection -0x7180 (SSL - Verification of the message MAC failed)
+
+Then increasing the mbedtls heap size might help. So you can set the option
+CONFIG_MBEDTLS_HEAP_SIZE to some higher value.
+
+Example:
+CONFIG_MBEDTLS_HEAP_SIZE=30000
