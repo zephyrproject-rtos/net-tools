@@ -375,6 +375,11 @@ serial_to_tun(FILE *inslip, int outfd)
 unsigned char slip_buf[2000];
 int slip_end, slip_begin;
 
+static void flush_neighbors(const char *tundev)
+{
+	ssystem("ip neigh flush dev %s", tundev);
+}
+
 int
 get_slipfd()
 {
@@ -482,6 +487,7 @@ get_slipfd()
     slipfd = fd;
 
     printf("slipfd and inslip reopened\n");
+    flush_neighbors(tundev);
     return 1;
   }
 
