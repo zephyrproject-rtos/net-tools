@@ -369,6 +369,7 @@ extern char *optarg;
 int main(int argc, char**argv)
 {
 	int c, ret, fd4, fd6, fd4m, fd6m, tcp4, tcp6, i = 0, timeout = 0;
+	int port = SERVER_PORT;
 	int accepted4 = -1, accepted6 = -1;
 	struct sockaddr_in6 addr6_recv = { 0 }, maddr6 = { 0 };
 	struct in6_addr mcast6_addr = MY_MCAST_ADDR6;
@@ -386,10 +387,13 @@ int main(int argc, char**argv)
 
 	opterr = 0;
 
-	while ((c = getopt(argc, argv, "i:r")) != -1) {
+	while ((c = getopt(argc, argv, "i:p:r")) != -1) {
 		switch (c) {
 		case 'i':
 			interface = optarg;
+			break;
+		case 'p':
+			port = atoi(optarg);
 			break;
 		case 'r':
 			do_reverse = true;
@@ -398,9 +402,10 @@ int main(int argc, char**argv)
 	}
 
 	if (!interface) {
-		printf("usage: %s [-r] -i <iface>\n", argv[0]);
+		printf("usage: %s [-r] -i <iface> [-p <port>]\n", argv[0]);
 		printf("\t-r Reverse the sent UDP data.\n");
 		printf("\t-i Use this network interface.\n");
+		printf("\t-p Use this port (default is %d)\n", SERVER_PORT);
 		exit(-EINVAL);
 	}
 
@@ -411,7 +416,7 @@ int main(int argc, char**argv)
 	}
 
 	addr4_recv.sin_family = AF_INET;
-	addr4_recv.sin_port = htons(SERVER_PORT);
+	addr4_recv.sin_port = htons(port);
 
 	/* We want to bind to global unicast address here so that
 	 * we can listen correct addresses. We do not want to listen
@@ -423,7 +428,7 @@ int main(int argc, char**argv)
 			 addr_buf, sizeof(addr_buf)));
 
 	addr6_recv.sin6_family = AF_INET6;
-	addr6_recv.sin6_port = htons(SERVER_PORT);
+	addr6_recv.sin6_port = htons(port);
 
 	/* Bind to global unicast address instead of ll address */
 	get_address(interface, AF_INET6, &addr6_recv.sin6_addr);
@@ -433,12 +438,12 @@ int main(int argc, char**argv)
 
 	memcpy(&maddr6.sin6_addr, &mcast6_addr, sizeof(struct in6_addr));
 	maddr6.sin6_family = AF_INET6;
-	maddr6.sin6_port = htons(SERVER_PORT);
+	maddr6.sin6_port = htons(port);
 
 	mcast4_addr.s_addr = inet_addr(MY_MCAST_ADDR4);
 	memcpy(&maddr4.sin_addr, &mcast4_addr, sizeof(struct in_addr));
 	maddr4.sin_family = AF_INET;
-	maddr4.sin_port = htons(SERVER_PORT);
+	maddr4.sin_port = htons(port);
 
 	fd4 = get_socket(AF_INET, IPPROTO_UDP);
 	fd6 = get_socket(AF_INET6, IPPROTO_UDP);
