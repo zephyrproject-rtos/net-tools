@@ -393,7 +393,7 @@ extern char *optarg;
  */
 int main(int argc, char**argv)
 {
-	int c, ret, fd, i = 0, timeout = -1;
+	int c, ret, fd, i = 0, timeout = -1, port = SERVER_PORT;
 	bool flood = false, multicast = false;
 	struct sockaddr_in6 addr6_send = { 0 }, addr6_recv = { 0 };
 	struct sockaddr_in addr4_send = { 0 }, addr4_recv = { 0 };
@@ -410,7 +410,7 @@ int main(int argc, char**argv)
 
 	opterr = 0;
 
-	while ((c = getopt(argc, argv, "Fi:eth")) != -1) {
+	while ((c = getopt(argc, argv, "Fi:p:eth")) != -1) {
 		switch (c) {
 		case 'F':
 			flood = true;
@@ -423,6 +423,9 @@ int main(int argc, char**argv)
 			break;
 		case 't':
 			tcp = true;
+			break;
+		case 'p':
+			port = atoi(optarg);
 			break;
 		case 'r':
 			do_reverse = true;
@@ -443,6 +446,7 @@ int main(int argc, char**argv)
 		       "multicast server address.\n");
 		printf("-e Do not quit, send packets forever\n");
 		printf("-t Use TCP, default is to use UDP only\n");
+		printf("-p Use this port, default port is %d\n", SERVER_PORT);
 		printf("-r Check data by reversing it (needed when checking "
 		       "legacy stack\n");
 		printf("-F (flood) option will prevent the client from "
@@ -461,7 +465,7 @@ int main(int argc, char**argv)
 
 			addr_send = (struct sockaddr *)&addr4_send;
 			addr_recv = (struct sockaddr *)&addr4_recv;
-			addr4_send.sin_port = htons(SERVER_PORT);
+			addr4_send.sin_port = htons(port);
 			addr4_recv.sin_family = AF_INET;
 			addr4_recv.sin_addr.s_addr = INADDR_ANY;
 			if (!tcp)
@@ -476,7 +480,7 @@ int main(int argc, char**argv)
 
 		addr_send = (struct sockaddr *)&addr6_send;
 		addr_recv = (struct sockaddr *)&addr6_recv;
-		addr6_send.sin6_port = htons(SERVER_PORT);
+		addr6_send.sin6_port = htons(port);
 		addr6_recv.sin6_family = AF_INET6;
 		addr6_recv.sin6_addr = any;
 		if (!tcp)
