@@ -1,50 +1,81 @@
 /*
- * Copyright (c) 2015 Intel Corporation
+ *  Simple DTLS client program that does the same thing as echo-client but
+ *  over encrypted UDP link.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ *  Copyright (C) 2006-2015, ARM Limited, All Rights Reserved
+ *  Copyright (C) 2017 Intel Corporation
+ *  SPDX-License-Identifier: Apache-2.0
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *  Licensed under the Apache License, Version 2.0 (the "License"); you may
+ *  not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ *  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
  */
 
-#include <stdio.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <poll.h>
 #include <errno.h>
-#include <arpa/inet.h>
-#include <stdlib.h>
-#include <string.h>
 #include <stdbool.h>
-#include <net/if.h>
-#include <linux/sockios.h>
-#include <ifaddrs.h>
-#include <signal.h>
+#include <stdint.h>
 #include <unistd.h>
 
-#include <tinydtls.h>
-#include <global.h>
-#include <debug.h>
-#include <dtls.h>
-
-#ifdef __GNUC__
-#define UNUSED_PARAM __attribute__((unused))
+#if !defined(MBEDTLS_CONFIG_FILE)
+#include "mbedtls/config.h"
 #else
-#define UNUSED_PARAM
-#endif /* __GNUC__ */
+#include MBEDTLS_CONFIG_FILE
+#endif
 
-#define SERVER_PORT  4242
+#if defined(MBEDTLS_PLATFORM_C)
+#include "mbedtls/platform.h"
+#else
+#include <stdio.h>
+#define mbedtls_printf     printf
+#define mbedtls_fprintf    fprintf
+#endif
 
-#define CLIENT_PORT  8484
-#define MAX_BUF_SIZE 1280	/* min IPv6 MTU, the actual data is smaller */
-#define MAX_TIMEOUT  3		/* in seconds */
+#if !defined(MBEDTLS_SSL_CLI_C) || !defined(MBEDTLS_SSL_PROTO_DTLS) ||    \
+    !defined(MBEDTLS_NET_C)  || !defined(MBEDTLS_TIMING_C) ||             \
+    !defined(MBEDTLS_ENTROPY_C) || !defined(MBEDTLS_CTR_DRBG_C) ||        \
+    !defined(MBEDTLS_X509_CRT_PARSE_C) || !defined(MBEDTLS_RSA_C) ||      \
+    !defined(MBEDTLS_CERTS_C) || !defined(MBEDTLS_PEM_PARSE_C)
+int main(void)
+{
+    mbedtls_printf("MBEDTLS_SSL_CLI_C and/or MBEDTLS_SSL_PROTO_DTLS and/or "
+            "MBEDTLS_NET_C and/or MBEDTLS_TIMING_C and/or "
+            "MBEDTLS_ENTROPY_C and/or MBEDTLS_CTR_DRBG_C and/or "
+            "MBEDTLS_X509_CRT_PARSE_C and/or MBEDTLS_RSA_C and/or "
+            "MBEDTLS_CERTS_C and/or MBEDTLS_PEM_PARSE_C not defined.\n");
+    return(0);
+}
+#else
+
+#include <string.h>
+
+#include "mbedtls/net_sockets.h"
+#include "mbedtls/debug.h"
+#include "mbedtls/ssl.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/error.h"
+#include "mbedtls/certs.h"
+#include "mbedtls/timing.h"
+
+#define SERVER_PORT "4242"
+#define SERVER_NAME "localhost"
+#define HOSTNAME "localhost"
+#define SERVER_ADDR "127.0.0.1" /* forces IPv4 */
+#define MESSAGE     "Echo this"
+
+#define READ_TIMEOUT_MS 1000
+#define MAX_RETRY       5
+
+#define DEBUG_LEVEL 0
 
 static bool debug;
 static int renegotiate = -1;
@@ -285,423 +316,61 @@ static struct data {
 	{ 0, 0 }
 };
 
-struct client_data {
-	int fd;
-	int index; /* position in data[] */
-	int len;
-#define MAX_READ_BUF 2000
-	uint8 buf[MAX_READ_BUF];
-};
-
-static inline void reverse(unsigned char *buf, int len)
-{
-	int i, last = len - 1;
-
-	for(i = 0; i < len/2; i++) {
-		unsigned char tmp = buf[i];
-		buf[i] = buf[last - i];
-		buf[last - i] = tmp;
-	}
-}
-
-static int find_address(int family, struct ifaddrs *if_address,
-			const char *if_name, void *address)
-{
-	struct ifaddrs *tmp;
-	int error = -ENOENT;
-
-	for (tmp = if_address; tmp; tmp = tmp->ifa_next) {
-		if (tmp->ifa_addr &&
-		    !strncmp(tmp->ifa_name, if_name, IF_NAMESIZE) &&
-		    tmp->ifa_addr->sa_family == family) {
-
-			switch (family) {
-			case AF_INET: {
-				struct sockaddr_in *in4 =
-					(struct sockaddr_in *)tmp->ifa_addr;
-				if (in4->sin_addr.s_addr == INADDR_ANY)
-					continue;
-				if ((in4->sin_addr.s_addr & IN_CLASSB_NET) ==
-						((in_addr_t)0xa9fe0000))
-					continue;
-				memcpy(address, &in4->sin_addr,
-				       sizeof(struct in_addr));
-				error = 0;
-				goto out;
-			}
-			case AF_INET6: {
-				struct sockaddr_in6 *in6 =
-					(struct sockaddr_in6 *)tmp->ifa_addr;
-				if (!memcmp(&in6->sin6_addr, &in6addr_any,
-					    sizeof(struct in6_addr)))
-					continue;
-				if (IN6_IS_ADDR_LINKLOCAL(&in6->sin6_addr))
-					continue;
-
-				memcpy(address, &in6->sin6_addr,
-				       sizeof(struct in6_addr));
-				error = 0;
-				goto out;
-			}
-			default:
-				error = -EINVAL;
-				goto out;
-			}
-		}
-	}
-
-out:
-	return error;
-}
-
-static int get_address(const char *if_name, int family, void *address)
-{
-	struct ifaddrs *if_address;
-	int err;
-
-	if (getifaddrs(&if_address) < 0) {
-		err = -errno;
-		fprintf(stderr, "Cannot get interface addresses for "
-			"interface %s error %d/%s",
-			if_name, err, strerror(-err));
-		return err;
-	}
-
-	err = find_address(family, if_address, if_name, address);
-
-	freeifaddrs(if_address);
-
-	return err;
-}
-
-#define PSK_DEFAULT_IDENTITY "Client_identity"
-#define PSK_DEFAULT_KEY      "secretPSK"
-#define PSK_OPTIONS          "i:k:"
-
-static bool quit = false;
-static dtls_context_t *dtls_context;
-
-static const unsigned char ecdsa_priv_key[] = {
-			0x41, 0xC1, 0xCB, 0x6B, 0x51, 0x24, 0x7A, 0x14,
-			0x43, 0x21, 0x43, 0x5B, 0x7A, 0x80, 0xE7, 0x14,
-			0x89, 0x6A, 0x33, 0xBB, 0xAD, 0x72, 0x94, 0xCA,
-			0x40, 0x14, 0x55, 0xA1, 0x94, 0xA9, 0x49, 0xFA};
-
-static const unsigned char ecdsa_pub_key_x[] = {
-			0x36, 0xDF, 0xE2, 0xC6, 0xF9, 0xF2, 0xED, 0x29,
-			0xDA, 0x0A, 0x9A, 0x8F, 0x62, 0x68, 0x4E, 0x91,
-			0x63, 0x75, 0xBA, 0x10, 0x30, 0x0C, 0x28, 0xC5,
-			0xE4, 0x7C, 0xFB, 0xF2, 0x5F, 0xA5, 0x8F, 0x52};
-
-static const unsigned char ecdsa_pub_key_y[] = {
-			0x71, 0xA0, 0xD4, 0xFC, 0xDE, 0x1A, 0xB8, 0x78,
-			0x5A, 0x3C, 0x78, 0x69, 0x35, 0xA7, 0xCF, 0xAB,
-			0xE9, 0x3F, 0x98, 0x72, 0x09, 0xDA, 0xED, 0x0B,
-			0x4F, 0xAB, 0xC3, 0x6F, 0xC7, 0x72, 0xF8, 0x29};
-
-#ifdef DTLS_PSK
-/* The PSK information for DTLS */
-#define PSK_ID_MAXLEN 256
-#define PSK_MAXLEN 256
-static unsigned char psk_id[PSK_ID_MAXLEN];
-static size_t psk_id_length = 0;
-static unsigned char psk_key[PSK_MAXLEN];
-static size_t psk_key_length = 0;
-
-/* This function is the "key store" for tinyDTLS. It is called to
- * retrieve a key for the given identity within this particular
- * session. */
-static int get_psk_info(struct dtls_context_t *ctx UNUSED_PARAM,
-			const session_t *session UNUSED_PARAM,
-			dtls_credentials_type_t type,
-			const unsigned char *id, size_t id_len,
-			unsigned char *result, size_t result_length)
-{
-	switch (type) {
-	case DTLS_PSK_IDENTITY:
-		if (id_len) {
-			dtls_debug("got psk_identity_hint: '%.*s'\n", id_len,
-				   id);
-		}
-
-		if (result_length < psk_id_length) {
-			dtls_warn("cannot set psk_identity -- buffer too small\n");
-			return dtls_alert_fatal_create(DTLS_ALERT_INTERNAL_ERROR);
-		}
-
-		memcpy(result, psk_id, psk_id_length);
-		return psk_id_length;
-
-	case DTLS_PSK_KEY:
-		if (id_len != psk_id_length || memcmp(psk_id, id, id_len) != 0) {
-			dtls_warn("PSK for unknown id requested, exiting\n");
-			return dtls_alert_fatal_create(DTLS_ALERT_ILLEGAL_PARAMETER);
-		} else if (result_length < psk_key_length) {
-			dtls_warn("cannot set psk -- buffer too small\n");
-			return dtls_alert_fatal_create(DTLS_ALERT_INTERNAL_ERROR);
-		}
-
-		memcpy(result, psk_key, psk_key_length);
-		return psk_key_length;
-
-	default:
-		dtls_warn("unsupported request type: %d\n", type);
-	}
-
-	return dtls_alert_fatal_create(DTLS_ALERT_INTERNAL_ERROR);
-}
-#endif /* DTLS_PSK */
-
-#ifdef DTLS_ECC
-static int get_ecdsa_key(struct dtls_context_t *ctx,
-			 const session_t *session,
-			 const dtls_ecdsa_key_t **result)
-{
-	static const dtls_ecdsa_key_t ecdsa_key = {
-		.curve = DTLS_ECDH_CURVE_SECP256R1,
-		.priv_key = ecdsa_priv_key,
-		.pub_key_x = ecdsa_pub_key_x,
-		.pub_key_y = ecdsa_pub_key_y
-	};
-
-	*result = &ecdsa_key;
-	return 0;
-}
-
-static int verify_ecdsa_key(struct dtls_context_t *ctx,
-			    const session_t *session,
-			    const unsigned char *other_pub_x,
-			    const unsigned char *other_pub_y,
-			    size_t key_size)
-{
-	return 0;
-}
-#endif /* DTLS_ECC */
-
-static void print_data(const unsigned char *packet, int length)
-{
-	int n = 0;
-
-	while (length--) {
-		if (n % 16 == 0)
-			printf("%X: ", n);
-
-		printf("%X ", *packet++);
-
-		n++;
-		if (n % 8 == 0) {
-			if (n % 16 == 0)
-				printf("\n");
-			else
-				printf(" ");
-		}
-	}
-	printf("\n");
-}
-
-static void try_send(struct dtls_context_t *ctx, session_t *dst)
-{
-	struct client_data *user_data =
-			(struct client_data *)dtls_get_app_data(ctx);
-	int ret;
-
-	printf("Sending [%d] %d bytes\n",
-	       user_data->index, data[user_data->index].len);
-
-	if (debug)
-		print_data(data[user_data->index].buf,
-			   data[user_data->index].len);
-
-	ret = dtls_write(ctx, dst,
-			 (uint8 *)data[user_data->index].buf,
-			 data[user_data->index].len);
-	if (ret < 0) {
-		/* Failure */
-		quit = true;
-	}
-}
-
-static int read_from_peer(struct dtls_context_t *ctx,
-			  session_t *session,
-			  uint8 *read_data, size_t read_len)
-{
-	struct client_data *user_data =
-			(struct client_data *)dtls_get_app_data(ctx);
-
-	printf("Read [%d] from peer %zu bytes\n", user_data->index, read_len);
-
-	reverse(read_data, read_len);
-
-	if (debug)
-		print_data(read_data, read_len);
-
-	if (data[user_data->index].expecting_reply &&
-	    (data[user_data->index].len != read_len ||
-	     memcmp(data[user_data->index].buf, read_data, read_len) != 0)) {
-		fprintf(stderr, "Check failed [%d] len %zu\n",
-			user_data->index, read_len);
-		quit = true;
-	}
-	user_data->index++;
-	if (!data[user_data->index].buf) {
-		/* last entry, just bail out */
-		quit = true;
-		return 0;
-	}
-	if (user_data->index == renegotiate) {
-		printf("Starting to renegotiate keys\n");
-		dtls_renegotiate(ctx, session);
-		return 1;
-	}
-
-	try_send(ctx, session);
-	return 0;
-}
-
-static inline void sleep_ms(int ms)
-{
-	struct timeval tv;
-
-	tv.tv_sec = 0;
-	tv.tv_usec = ms * 1000;
-
-	select(1, NULL, NULL, NULL, &tv);
-}
-
-static int send_to_peer(struct dtls_context_t *ctx,
-			session_t *session,
-			uint8 *data, size_t len)
-{
-	struct client_data *user_data =
-			(struct client_data *)dtls_get_app_data(ctx);
-
-	/* The Qemu uart driver can loose chars if sent too fast.
-	 * So before sending more data, sleep a while.
-	 */
-	sleep_ms(200);
-
-	printf("Sending to peer data %p len %zu\n", data, len);
-	return sendto(user_data->fd, data, len, 0,
-		      &session->addr.sa, session->size);
-}
-
-static int dtls_handle_read(struct dtls_context_t *ctx)
-{
-	struct client_data *user_data;
-	session_t session;
-
-	user_data = (struct client_data *)dtls_get_app_data(ctx);
-
-	if (!user_data || !user_data->fd)
-		return -1;
-
-	memset(&session, 0, sizeof(session_t));
-	session.size = sizeof(session.addr);
-	user_data->len = recvfrom(user_data->fd, user_data->buf, MAX_READ_BUF,
-				  0, &session.addr.sa, &session.size);
-	if (user_data->len < 0) {
-		perror("recvfrom");
-		return -1;
-	} else {
-		dtls_dsrv_log_addr(DTLS_LOG_DEBUG, "peer", &session);
-		dtls_debug_dump("bytes from peer", user_data->buf,
-				user_data->len);
-	}
-
-	return dtls_handle_message(ctx, &session, user_data->buf,
-				   user_data->len);
-}
-
-static int handle_event(struct dtls_context_t *ctx, session_t *session,
-			dtls_alert_level_t level, unsigned short code)
-{
-	if (debug)
-		printf("event: level %d code %d\n", level, code);
-
-	if (level > 0) {
-		/* alert code, quit */
-		quit = true;
-	} else if (level == 0) {
-		/* internal event */
-		if (code == DTLS_EVENT_CONNECTED) {
-			/* We can send data now */
-			try_send(ctx, session);
-		}
-	}
-
-	return 0;
-}
-
-static dtls_handler_t cb = {
-	.write = send_to_peer,
-	.read  = read_from_peer,
-	.event = handle_event,
-#ifdef DTLS_PSK
-	.get_psk_info = get_psk_info,
-#endif /* DTLS_PSK */
-#ifdef DTLS_ECC
-	.get_ecdsa_key = get_ecdsa_key,
-	.verify_ecdsa_key = verify_ecdsa_key
-#endif /* DTLS_ECC */
-};
-
-void signal_handler(int signum)
-{
-	switch (signum) {
-	case SIGINT:
-	case SIGTERM:
-		quit = true;
-		break;
-	}
-}
-
 extern int optind, opterr, optopt;
 extern char *optarg;
 
-/* The application returns:
- *    < 0 : connection or similar error
- *      0 : no errors, all tests passed
- *    > 0 : could not send all the data to server
- */
-int main(int argc, char**argv)
+static void my_debug(void *ctx, int level,
+                      const char *file, int line,
+                      const char *str)
 {
-	int c, ret, fd, timeout = 0;
-	struct sockaddr_in6 addr6_send = { 0 }, addr6_recv = { 0 };
-	struct sockaddr_in addr4_send = { 0 }, addr4_recv = { 0 };
-	struct sockaddr *addr_send, *addr_recv;
-	int family, addr_len;
-	const struct in6_addr any = IN6ADDR_ANY_INIT;
-	const char *target = NULL, *interface = NULL, *source = NULL;
-	fd_set rfds;
-	struct timeval tv = {};
-	int on, port;
-	void *address = NULL;
-	session_t dst;
-	struct client_data user_data;
-	char addr_buf[INET6_ADDRSTRLEN];
+	((void) level);
 
-#ifdef DTLS_PSK
-	psk_id_length = strlen(PSK_DEFAULT_IDENTITY);
-	psk_key_length = strlen(PSK_DEFAULT_KEY);
-	memcpy(psk_id, PSK_DEFAULT_IDENTITY, psk_id_length);
-	memcpy(psk_key, PSK_DEFAULT_KEY, psk_key_length);
-#endif /* DTLS_PSK */
+	mbedtls_fprintf((FILE *) ctx, "%s:%04d: %s", file, line, str);
+	fflush( (FILE *) ctx );
+}
+
+int main(int argc, char *argv[])
+{
+	int ret, len, idx = 0;
+	mbedtls_net_context server_fd;
+	uint32_t flags;
+#define MAX_READ_BUF 2000
+	unsigned char buf[MAX_READ_BUF];
+	const char *pers = "dtls_client";
+	int retry_left = MAX_RETRY;
+	bool forever = false;
+
+	mbedtls_entropy_context entropy;
+	mbedtls_ctr_drbg_context ctr_drbg;
+	mbedtls_ssl_context ssl;
+	mbedtls_ssl_config conf;
+	mbedtls_x509_crt cacert;
+	mbedtls_timing_delay_context timer;
+
+	int c;
+	const char *target = SERVER_ADDR;
+	const char *target_port = SERVER_PORT;
+
+#define CA_CERT_FILE "echo-apps-cert.pem"
+	const char *ca_cert_file = CA_CERT_FILE;
 
 	opterr = 0;
 
-	while ((c = getopt(argc, argv, "b:i:Dr")) != -1) {
+	while ((c = getopt(argc, argv, "ep:c:Dr")) != -1) {
 		switch (c) {
-		case 'b':
-			source = optarg;
+		case 'e':
+			forever = true;
 			break;
-		case 'i':
-			interface = optarg;
+		case 'c':
+			ca_cert_file = optarg;
+			break;
+		case 'p':
+			target_port = optarg;
 			break;
 		case 'r':
 			/* Do a renegotiate once during the test run. */
 			srandom(time(0));
-			renegotiate = random() %
-				(sizeof(data) / sizeof(struct data) - 1 - 1);
+			renegotiate = random() % 10;
 			printf("Renegotating after %d messages.\n", renegotiate);
 			break;
 		case 'D':
@@ -714,201 +383,283 @@ int main(int argc, char**argv)
 		target = argv[optind];
 
 	if (!target) {
-		printf("usage: %s [-i tun0] [-D] [-r] <IPv{6|4} address of the dtls-server>\n",
-		       argv[0]);
-		printf("-i Use this network interface.\n");
+		printf("usage: %s [-c <CA cert file>] [-p <port>] [-D] [-e]"
+		       "[-r] <IPv{6|4} address of the dtls-server>\n", argv[0]);
+		printf("-c CA cert file (default is %s)\n", CA_CERT_FILE);
+		printf("-p Port number to use (default is %s)\n", SERVER_PORT);
 		printf("-r Renegoating keys once during the test run.\n");
+		printf("-e Run forever.\n");
 		printf("-D Activate debugging.\n");
-		printf("-b Bind to this IP address when sending data.\n");
 		exit(-EINVAL);
 	}
 
-	if (inet_pton(AF_INET6, target, &addr6_send.sin6_addr) != 1) {
-		if (inet_pton(AF_INET, target, &addr4_send.sin_addr) != 1) {
-			printf("Invalid address family\n");
-			exit(-EINVAL);
-		} else {
-			addr_send = (struct sockaddr *)&addr4_send;
-			addr_recv = (struct sockaddr *)&addr4_recv;
-			addr4_send.sin_port = port = htons(SERVER_PORT);
-			addr4_recv.sin_family = AF_INET;
-			addr4_recv.sin_port = htons(CLIENT_PORT);
-			family = AF_INET;
-			addr_len = sizeof(addr4_send);
-			address = &addr4_recv.sin_addr;
+#if defined(MBEDTLS_DEBUG_C)
+	mbedtls_debug_set_threshold(DEBUG_LEVEL);
+#endif
 
-			if (source) {
-				if (inet_pton(AF_INET, source,
-					      &addr4_recv.sin_addr) != 1) {
-					printf("Invalid address family for "
-					       "source IPv4 address\n");
-					exit(-EINVAL);
-				}
+	/*
+	 * 0. Initialize the RNG and the session data
+	 */
+	mbedtls_net_init(&server_fd);
+	mbedtls_ssl_init(&ssl);
+	mbedtls_ssl_config_init(&conf);
+	mbedtls_x509_crt_init(&cacert);
+	mbedtls_ctr_drbg_init(&ctr_drbg);
 
-				printf("Binding to %s\n",
-				       inet_ntop(family, address,
-						 addr_buf, sizeof(addr_buf)));
-			} else
-				addr4_recv.sin_addr.s_addr = INADDR_ANY;
-		}
-	} else {
-		addr_send = (struct sockaddr *)&addr6_send;
-		addr_recv = (struct sockaddr *)&addr6_recv;
-		addr6_send.sin6_port = port = htons(SERVER_PORT);
-		addr6_recv.sin6_family = AF_INET6;
-		addr6_recv.sin6_port = htons(CLIENT_PORT);
-		family = AF_INET6;
-		addr_len = sizeof(addr6_send);
-		address = &addr6_recv.sin6_addr;
+	mbedtls_printf("\n  . Seeding the random number generator...");
+	fflush(stdout);
 
-		if (source) {
-			if (inet_pton(AF_INET6, source,
-					      &addr6_recv.sin6_addr) != 1) {
-				printf("Invalid address family for "
-				       "source IPv6 address\n");
-				exit(-EINVAL);
-			}
-
-			printf("Binding to %s\n", inet_ntop(family, address,
-					    addr_buf, sizeof(addr_buf)));
-		} else
-			addr6_recv.sin6_addr = any;
-
+	mbedtls_entropy_init(&entropy);
+	if ((ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func,
+					 &entropy,
+					 (const unsigned char *) pers,
+					 strlen(pers))) != 0) {
+		mbedtls_printf(" failed\n  ! mbedtls_ctr_drbg_seed returned %d\n", ret);
+		goto exit;
 	}
 
-	addr_send->sa_family = family;
-	addr_recv->sa_family = family;
+	mbedtls_printf(" ok\n");
 
-	fd = socket(family, SOCK_DGRAM, IPPROTO_UDP);
-	if (fd < 0) {
-		perror("socket");
-		exit(-errno);
-	}
+	/*
+	 * 0. Load certificates
+	 */
+	mbedtls_printf("  . Loading the CA root certificate ...");
+	fflush(stdout);
 
-	if (interface) {
-		struct ifreq ifr;
-
-		memset(&ifr, 0, sizeof(ifr));
-		snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", interface);
-
-		if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE,
-			       (void *)&ifr, sizeof(ifr)) < 0) {
-			perror("SO_BINDTODEVICE");
-			exit(-errno);
-		}
-
-		if (!source) {
-			ret = get_address(interface, family, address);
-			if (ret < 0) {
-				printf("Cannot find suitable source address "
-				       "for interface %s [%d/%s]\n",
-				       interface, ret, strerror(-ret));
-			}
-
-			printf("Binding to %s\n", inet_ntop(family, address,
-					    addr_buf, sizeof(addr_buf)));
-		}
-	}
-
-	ret = bind(fd, addr_recv, addr_len);
+	ret = mbedtls_x509_crt_parse_file(&cacert, ca_cert_file);
 	if (ret < 0) {
-		perror("bind");
-		exit(-errno);
+		mbedtls_printf(" failed\n  !  mbedtls_x509_crt_parse_file returned -0x%x\n\n", -ret);
+		goto exit;
 	}
 
-	on = 1;
+	mbedtls_printf(" ok (%d skipped)\n", ret);
 
-	if (family == AF_INET6) {
-#ifdef IPV6_RECVPKTINFO
-		if (setsockopt(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &on,
-			       sizeof(on)) < 0) {
-#else /* IPV6_RECVPKTINFO */
-		if (setsockopt(fd, IPPROTO_IPV6, IPV6_PKTINFO, &on,
-			       sizeof(on)) < 0) {
-#endif /* IPV6_RECVPKTINFO */
-			printf("setsockopt IPV6_PKTINFO: %s\n",
-			       strerror(errno));
+	/*
+	 * 1. Start the connection
+	 */
+	mbedtls_printf("  . Connecting to udp/%s/%s...", target, target_port);
+	fflush(stdout);
+
+	if ((ret = mbedtls_net_connect(&server_fd, target,
+				       target_port,
+				       MBEDTLS_NET_PROTO_UDP)) != 0) {
+		mbedtls_printf(" failed\n  ! mbedtls_net_connect returned %d\n\n", ret);
+		goto exit;
+	}
+
+	mbedtls_printf(" ok\n");
+
+	/*
+	 * 2. Setup stuff
+	 */
+	mbedtls_printf("  . Setting up the DTLS structure...");
+	fflush(stdout);
+
+	if ((ret = mbedtls_ssl_config_defaults(&conf,
+					       MBEDTLS_SSL_IS_CLIENT,
+					       MBEDTLS_SSL_TRANSPORT_DATAGRAM,
+					       MBEDTLS_SSL_PRESET_DEFAULT)) != 0) {
+		mbedtls_printf(" failed\n  ! mbedtls_ssl_config_defaults returned %d\n\n", ret);
+		goto exit;
+	}
+
+	mbedtls_ssl_conf_cert_profile(&conf, &mbedtls_x509_crt_profile_default);
+	mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+	mbedtls_ssl_conf_ca_chain(&conf, &cacert, NULL);
+	mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &ctr_drbg);
+	mbedtls_ssl_conf_dbg(&conf, my_debug, stdout);
+
+	if ((ret = mbedtls_ssl_setup(&ssl, &conf)) != 0) {
+		mbedtls_printf(" failed\n  ! mbedtls_ssl_setup returned %d\n\n", ret);
+		goto exit;
+	}
+
+	if ((ret = mbedtls_ssl_set_hostname(&ssl, HOSTNAME)) != 0) {
+		mbedtls_printf(" failed\n  ! mbedtls_ssl_set_hostname returned %d\n\n", ret);
+		goto exit;
+	}
+
+	mbedtls_ssl_set_bio(&ssl, &server_fd,
+			    mbedtls_net_send, mbedtls_net_recv,
+			    mbedtls_net_recv_timeout);
+
+	mbedtls_ssl_set_timer_cb(&ssl, &timer, mbedtls_timing_set_delay,
+				 mbedtls_timing_get_delay);
+
+	mbedtls_printf(" ok\n");
+
+	/*
+	 * 4. Handshake
+	 */
+	mbedtls_printf("  . Performing the SSL/TLS handshake...");
+	fflush(stdout);
+
+	do ret = mbedtls_ssl_handshake(&ssl);
+	while(ret == MBEDTLS_ERR_SSL_WANT_READ ||
+	      ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+
+	if (ret != 0) {
+		mbedtls_printf(" failed\n  ! mbedtls_ssl_handshake returned -0x%x\n\n", -ret);
+		goto exit;
+	}
+
+	mbedtls_printf(" ok\n");
+
+	/*
+	 * 5. Verify the server certificate
+	 */
+	mbedtls_printf("  . Verifying peer X.509 certificate...");
+
+	/* In real life, we would have used MBEDTLS_SSL_VERIFY_REQUIRED so that the
+	 * handshake would not succeed if the peer's cert is bad.  Even if we used
+	 * MBEDTLS_SSL_VERIFY_OPTIONAL, we would bail out here if ret != 0 */
+	if ((flags = mbedtls_ssl_get_verify_result(&ssl)) != 0) {
+		char vrfy_buf[512];
+
+		mbedtls_printf(" failed\n");
+
+		mbedtls_x509_crt_verify_info(vrfy_buf, sizeof(vrfy_buf), "  ! ", flags);
+
+		mbedtls_printf("%s\n", vrfy_buf);
+
+		goto exit;
+	} else
+		mbedtls_printf(" ok\n");
+
+	/*
+	 * 6. Write the echo request
+	 */
+send_request:
+	mbedtls_printf("  > Write to server:");
+	fflush(stdout);
+
+	len = data[idx].len;
+
+	/* For time being, restrict largest frame to 1024 bytes so that we make
+	 * sure that the sent packets are not fragmented.
+	 */
+	if (len > 1024)
+		len = 1024;
+
+	if (len == 0) {
+		mbedtls_printf(" Invalid byte count 0 in the data array "
+			       "at index %d\n", idx);
+		goto close_notify;
+	}
+
+	do ret = mbedtls_ssl_write(&ssl, data[idx].buf, len);
+	while(ret == MBEDTLS_ERR_SSL_WANT_READ ||
+	      ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+
+	if (ret < 0) {
+		mbedtls_printf(" failed\n  ! mbedtls_ssl_write returned %d\n\n", ret);
+		goto exit;
+	}
+
+	mbedtls_printf(" %d bytes written\n", ret);
+
+	/*
+	 * 7. Read the echo response
+	 */
+	mbedtls_printf("  < Read from server:");
+	fflush(stdout);
+
+	memset(buf, 0, sizeof(buf));
+
+	do ret = mbedtls_ssl_read(&ssl, buf, len);
+	while(ret == MBEDTLS_ERR_SSL_WANT_READ ||
+	      ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+
+	if (ret <= 0) {
+		switch(ret) {
+		case MBEDTLS_ERR_SSL_TIMEOUT:
+			mbedtls_printf(" timeout\n\n");
+			if (retry_left-- > 0)
+				goto send_request;
+			goto exit;
+
+		case MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY:
+			mbedtls_printf(" connection was closed gracefully\n");
+			ret = 0;
+			goto close_notify;
+
+		default:
+			mbedtls_printf(" mbedtls_ssl_read returned -0x%x\n\n", -ret);
+			goto exit;
 		}
 	}
 
-	signal(SIGINT, signal_handler);
-	signal(SIGTERM, signal_handler);
+	mbedtls_printf(" %d bytes read\n", ret);
 
-	dtls_init();
-
-	user_data.fd = fd;
-	user_data.index = 0;
-
-	dtls_context = dtls_new_context(&user_data);
-	if (!dtls_context) {
-		dtls_emerg("cannot create context\n");
-		exit(-EINVAL);
+	if (ret != len) {
+		mbedtls_printf(" Sent and received byte count mismatch "
+			       "(%d vs %d)\n", len, ret);
+		goto close_notify;
 	}
 
-	dtls_set_handler(dtls_context, &cb);
+	if (memcmp(data[idx].buf, buf, len)) {
+		mbedtls_printf(" Sent and received data mismatch\n");
+		goto close_notify;
+	}
 
-	if (debug)
-		dtls_set_log_level(DTLS_LOG_DEBUG);
+	idx++;
 
-	memset(&dst, 0, sizeof(dst));
-	dst.addr.sin.sin_port = port;
-	dst.size = addr_len;
-	memcpy(&dst.addr.sa, addr_send, addr_len);
-
-	dtls_connect(dtls_context, &dst);
-
-	do {
-		FD_ZERO(&rfds);
-		FD_SET(fd, &rfds);
-		tv.tv_sec = MAX_TIMEOUT;
-		tv.tv_usec = 0;
-
-		ret = select(fd + 1, &rfds, NULL, NULL, &tv);
-		if (ret < 0) {
-			perror("select");
-			break;
-		} else if (ret == 0) {
-			if (quit)
-				break;
-
-			if (user_data.index >
-			    (sizeof(data) / sizeof(struct data)) - 1)
-				break;
-
-			if (!data[user_data.index].expecting_reply) {
-				printf("Did not expect a reply, send next entry.\n");
-				user_data.index++;
-				if (!data[user_data.index].buf)
-					break;
-
-				continue;
-			}
-
-			fprintf(stderr,	"Timeout [%d] while waiting len %d\n",
-				user_data.index, data[user_data.index].len);
-			ret = user_data.index + 1;
-			break;
-		} else if (!FD_ISSET(fd, &rfds)) {
-			fprintf(stderr, "Invalid fd in read, quitting.\n");
-			ret = user_data.index + 1;
-			break;
+	if (idx >= ((sizeof(data) / sizeof(data[0])) - 1)) {
+		if (!forever) {
+			goto close_notify;
 		}
 
-		if (dtls_handle_read(dtls_context) < 0) {
-			fprintf(stderr, "Peer connection failed.\n");
-			ret = user_data.index + 1;
-			break;
-		}
+		idx = 0;
+	}
 
-	} while(!quit);
+	goto send_request;
 
-	printf("\n");
+	/*
+	 * 8. Done, cleanly close the connection
+	 */
+close_notify:
+	mbedtls_printf("  . Closing the connection...");
 
-	dtls_close(dtls_context, &dst);
+	/* No error checking, the connection might be closed already */
+	do ret = mbedtls_ssl_close_notify(&ssl);
+	while(ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+	ret = 0;
 
-	dtls_free_context(dtls_context);
+	mbedtls_printf(" done\n");
 
-	close(fd);
+	/*
+	 * 9. Final clean-ups and exit
+	 */
+exit:
 
-	exit(ret);
+#ifdef MBEDTLS_ERROR_C
+	if (ret != 0) {
+		char error_buf[100];
+		mbedtls_strerror(ret, error_buf, 100);
+		mbedtls_printf("Last error was: %d - %s\n\n", ret, error_buf);
+	}
+#endif
+
+	mbedtls_net_free(&server_fd);
+
+	mbedtls_x509_crt_free(&cacert);
+	mbedtls_ssl_free(&ssl);
+	mbedtls_ssl_config_free(&conf);
+	mbedtls_ctr_drbg_free(&ctr_drbg);
+	mbedtls_entropy_free(&entropy);
+
+#if defined(_WIN32)
+	mbedtls_printf("  + Press Enter to exit this program.\n");
+	fflush(stdout); getchar();
+#endif
+
+	/* Shell can not handle large exit numbers -> 1 for errors */
+	if (ret < 0)
+		ret = 1;
+
+	return(ret);
 }
+#endif /* MBEDTLS_SSL_CLI_C && MBEDTLS_SSL_PROTO_DTLS && MBEDTLS_NET_C &&
+          MBEDTLD_TIMING_C && MBEDTLS_ENTROPY_C && MBEDTLS_CTR_DRBG_C &&
+          MBEDTLS_X509_CRT_PARSE_C && MBEDTLS_RSA_C && MBEDTLS_CERTS_C &&
+          MBEDTLS_PEM_PARSE_C */

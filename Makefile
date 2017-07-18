@@ -13,17 +13,28 @@ TINYDTLS = tinydtls-0.8.2
 TINYDTLS_CFLAGS = -I$(TINYDTLS) -DDTLSv12 -DWITH_SHA256 -DDTLS_ECC -DDTLS_PSK
 TINYDTLS_LIB = $(TINYDTLS)/libtinydtls.a
 
+MBEDTLS = mbedtls-2.4.0
+MBEDTLS_CFLAGS = -I$(MBEDTLS)/include
+MBEDTLS_LIB =  $(MBEDTLS)/library/libmbedtls.a \
+	$(MBEDTLS)/library/libmbedx509.a $(MBEDTLS)/library/libmbedcrypto.a
+
 $(TINYDTLS_LIB):
 	(cd tinydtls-0.8.2; ./configure; make)
 
 .PHONY: tinydtls
 tinydtls: $(TINYDTLS_LIB)
 
-dtls-client.o: dtls-client.c
-	$(CC) -c -o $@ $(CFLAGS) $(TINYDTLS_CFLAGS) dtls-client.c
+$(MBEDTLS_LIB):
+	(cd mbedtls-2.4.0; make)
 
-dtls-client: dtls-client.o $(TINYDTLS_LIB)
-	$(CC) -o $@ $(LIBS) dtls-client.o $(TINYDTLS_LIB)
+.PHONY: mbedtls
+mbedtls: $(MBEDTLS_LIB)
+
+dtls-client.o: dtls-client.c
+	$(CC) -c -o $@ $(CFLAGS) $(MBEDTLS_CFLAGS) dtls-client.c
+
+dtls-client: dtls-client.o $(MBEDTLS_LIB)
+	$(CC) -o $@ $(LIBS) dtls-client.o $(MBEDTLS_LIB)
 
 dtls-server.o: dtls-server.c
 	$(CC) -c -o $@ $(CFLAGS) $(TINYDTLS_CFLAGS) dtls-server.c
@@ -63,5 +74,9 @@ clean-libcoap:
 clean-tinydtls:
 	(cd tinydtls-0.8.2; make distclean)
 
-clean: clean-libcoap clean-tinydtls
+.PHONY: clean-mbedtls
+clean-mbedtls:
+	(cd mbedtls-2.4.0; make clean)
+
+clean: clean-libcoap clean-tinydtls clean-mbedtls
 	rm -f *.o tunslip6 tunslip echo-client echo-server dtls-client dtls-server monitor_15_4 coap-client

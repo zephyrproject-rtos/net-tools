@@ -114,6 +114,18 @@ $ openssl pkcs8 -topk8 -inform PEM -outform DER -nocrypt \
 	sed 's/0x  ,//g'
 
 
+Using DTSL link with echo-* programs
+====================================
+
+For DTLS client functionality, you can do this
+
+# ./dtls-client -c echo-apps-cert.pem 2001:db8::1
+
+or
+
+# ./dtls-client -c echo-apps-cert.pem 192.0.2.1
+
+
 TLS connecitivity errors
 ========================
 
