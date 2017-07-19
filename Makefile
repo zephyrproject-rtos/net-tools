@@ -37,10 +37,10 @@ dtls-client: dtls-client.o $(MBEDTLS_LIB)
 	$(CC) -o $@ $(LIBS) dtls-client.o $(MBEDTLS_LIB)
 
 dtls-server.o: dtls-server.c
-	$(CC) -c -o $@ $(CFLAGS) $(TINYDTLS_CFLAGS) dtls-server.c
+	$(CC) -c -o $@ $(CFLAGS) $(MBEDTLS_CFLAGS) dtls-server.c
 
-dtls-server: dtls-server.o $(TINYDTLS_LIB)
-	$(CC) -o $@ $(LIBS) dtls-server.o $(TINYDTLS_LIB)
+dtls-server: dtls-server.o $(MBEDTLS_LIB)
+	$(CC) -o $@ $(LIBS) dtls-server.o $(MBEDTLS_LIB)
 
 GLIB=`pkg-config --cflags --libs glib-2.0`
 
