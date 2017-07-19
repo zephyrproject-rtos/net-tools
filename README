@@ -125,6 +125,10 @@ or
 
 # ./dtls-client -c echo-apps-cert.pem 192.0.2.1
 
+For DTLS server functionality, you can do this
+
+# ./dtls-server
+
 
 TLS connecitivity errors
 ========================
