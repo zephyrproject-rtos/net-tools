@@ -1,3 +1,14 @@
+*.o
+*.a
+*.d
+*.cmd
+*.log
+*.pyc
+*.swp
+*.swo
+*~
+cscope.*
+.dir
 # .gitignore for zephyr tools
 
 coap-client
