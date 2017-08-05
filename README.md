@@ -124,7 +124,7 @@ $ openssl pkcs8 -topk8 -inform PEM -outform DER -nocrypt \
     sed 's/0x  ,//g'
 ```
 
-# Using DTLS link with echo-* programs
+## Using DTLS link with echo-* programs
 
 For DTLS client functionality, you can do this
 
