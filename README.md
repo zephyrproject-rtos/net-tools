@@ -1,28 +1,35 @@
+[![Run Status](https://api.shippable.com/projects/58ffb2b81fb3ec0700e1602f/badge?branch=master)](https://app.shippable.com/github/zephyrproject-rtos/net-tools)
+
+# Networking Tools
+
 The comments and instructions below are for the new IP stack in Zephyr.
-For Contiki based uIP stack, see instructions in README.legacy file.
 
 Here are instructions how to communicate between Zephyr that is running
-inside Qemu, and host device that is running Linux.
+inside QEMU, and host device that is running Linux.
 
-You need to run socat and tunslip to create a minimally working
+You need to run *socat* and *tunslip* to create a minimally working
 network setup.
 
-There are convenience scripts (loop-socat.sh and loop-slip-tap.sh) for
+There are convenience scripts (_loop-socat.sh_ and _loop-slip-tap.sh_) for
 running socat and tunslip6 processes. For running these, you need two
 terminals.
 
 Terminal 1:
+```
 $ ./loop-socat.sh
+```
 
 Terminal 2:
+```
 $ sudo ./loop-slip-tap.sh
+```
 
 After running these scripts you do not need to manually restart
 them when qemu process stops.
 
 In the Qemu side, you need to compile the kernel with proper config.
 Minimally you need these settings active in your project config file.
-
+```
 CONFIG_NETWORKING=y
 CONFIG_NET_IPV6=y
 CONFIG_NET_IPV4=y
@@ -35,28 +42,29 @@ CONFIG_SYS_LOG=y
 CONFIG_SYS_LOG_SHOW_COLOR=y
 CONFIG_NANO_TIMEOUTS=y
 CONFIG_TEST_RANDOM_GENERATOR=y
+```
 
 After you have the loop scripts and Qemu running running you can communicate
 with the Zephyr.
 
 If your have echo-server running in the Qemu, then you can use the echo-client
 tool in net-tools directory to communicate with it.
-
+```
 # ./echo-client -i tap0 2001:db8::1
-
+```
 The IP stack responds to ping requests if properly configured.
-
+```
 $ ping6 -I tap0 -c 1 2001:db8::1
-
+```
 You can attach wireshark to tap0 interface to see what data is being
 transferred.
 
 If building with CONFIG_NET_TCP=y in your project config file, it's possible
 to run the echo-server sample in Zephyr, and then test the TCP stack using
 the supplied tcptest.py script:
-
+```
 $ ./tcptest.py tap0 2001:db8::1
-
+```
 This script will send numbers to the echo-server program, read them back,
 and compare if it got the exact bytes back.  Transmission errors, timeouts,
 and time to get the response are all recorded and printed to the standard
@@ -66,72 +74,74 @@ Be sure to use Python 3, as it requires a function from the socket module
 that's only available in this version (wrapper around if_nametoindex(3)).
 
 
-Using encrypted SSL link with echo-* programs
-=============================================
+## Using encrypted SSL link with echo-* programs
 
 Install stunnel
 
 Fedora:
-# dnf install stunnel
-
+```
+$ dnf install stunnel
+```
 Ubuntu:
-# apt-get install stunnel4 -y
-
+```
+$ apt-get install stunnel4 -y
+```
 Finally run the stunnel script in Linux
+```
 $ ./stunnel.sh
-
+```
 And connect echo-client to this SSL tunnel (note that the IP address
 is the address of Linux host where the tunnel end point is located).
-
-# ./echo-client -p 4243 2001:db8::2 -t
-
+```
+$ ./echo-client -p 4243 2001:db8::2 -t
+```
 If you are running echo-client in Zephyr QEMU, then run echo-server like
 this:
-
-# ./echo-server -p 4244 -i tap0
-
+```
+$ ./echo-server -p 4244 -i tap0
+```
 
 If you want to re-create the certificates in echo-server and echo-client in
 Zephyr net samples, then they can be created like this (note that you do not
 need to do this as the certs have been prepared already in echo-server and
 echo-client sample sources):
-
+```
 $ openssl genrsa -out echo-apps-key.pem 2048
 $ openssl req -new -x509 -key echo-apps-key.pem -out echo-apps-cert.pem \
-	-days 10000 -subj '/CN=localhost'
-
+    -days 10000 -subj '/CN=localhost'
+```
 The cert that is to be embedded into test_certs.h in echo-server and
 echo-client, can be generated like this:
-
+```
 $ openssl x509 -in echo-apps-cert.pem -outform DER | \
-	hexdump -e '8/1 "0x%02x, " "\n"' | sed 's/0x  ,//g'
-
+    hexdump -e '8/1 "0x%02x, " "\n"' | sed 's/0x  ,//g'
+```
 The private key to be embedded into test_certs.h in echo-server can be
 generated like this:
-
+```
 $ openssl pkcs8 -topk8 -inform PEM -outform DER -nocrypt \
-	-in echo-apps-key.pem | hexdump -e '8/1 "0x%02x, " "\n"' | \
-	sed 's/0x  ,//g'
+    -in echo-apps-key.pem | hexdump -e '8/1 "0x%02x, " "\n"' | \
+    sed 's/0x  ,//g'
+```
 
-
-Using DTSL link with echo-* programs
-====================================
+# Using DTLS link with echo-* programs
 
 For DTLS client functionality, you can do this
 
-# ./dtls-client -c echo-apps-cert.pem 2001:db8::1
-
+```
+$ ./dtls-client -c echo-apps-cert.pem 2001:db8::1
+```
 or
-
-# ./dtls-client -c echo-apps-cert.pem 192.0.2.1
-
+```
+$ ./dtls-client -c echo-apps-cert.pem 192.0.2.1
+```
 For DTLS server functionality, you can do this
 
-# ./dtls-server
+```
+$ ./dtls-server
+```
 
-
-TLS connecitivity errors
-========================
+## TLS connecitivity errors
 
 If you see this error print in zephyr console
 
@@ -141,4 +151,6 @@ Then increasing the mbedtls heap size might help. So you can set the option
 CONFIG_MBEDTLS_HEAP_SIZE to some higher value.
 
 Example:
+```
 CONFIG_MBEDTLS_HEAP_SIZE=30000
+```
