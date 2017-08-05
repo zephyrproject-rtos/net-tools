@@ -19,7 +19,6 @@ build:
     ci:
       - sudo apt-get install libglib2.0-dev libpcap-dev
       - export CCACHE_DIR=${SHIPPABLE_BUILD_DIR}/ccache/.ccache
-      - git rebase origin/${PULL_REQUEST_BASE_BRANCH}
       - ccache -c -s --max-size=2000M
       - make
 
@@ -41,8 +40,5 @@ integrations:
       branches:
         only:
           - master
-          - net
-          - bluetooth
-          - arm
       on_success: never
       on_failure: never
