@@ -581,20 +581,22 @@ int main(int argc, char**argv)
 			break;
 
 		/* TCP IPv4 */
-		if (tcp_receive_and_reply(&rfds, &errfds,
-					  accepted4, accepted4,
-					  buf, sizeof(buf),
-					  IPPROTO_TCP) < 0) {
+		ret = tcp_receive_and_reply(&rfds, &errfds,
+					    accepted4, accepted4,
+					    buf, sizeof(buf),
+					    IPPROTO_TCP);
+		if (ret < 0) {
 			break;
 		} else if (ret == 0) {
 			accepted4 = -1;
 		}
 
 		/* TCP IPv6 */
-		if (tcp_receive_and_reply(&rfds, &errfds,
-					  accepted6, accepted6,
-					  buf, sizeof(buf),
-					  IPPROTO_TCP) < 0) {
+		ret = tcp_receive_and_reply(&rfds, &errfds,
+					    accepted6, accepted6,
+					    buf, sizeof(buf),
+					    IPPROTO_TCP);
+		if (ret < 0) {
 			break;
 		} else if (ret == 0) {
 			accepted6 = -1;
