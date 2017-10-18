@@ -48,7 +48,7 @@ static char *path = NULL;
 static char *pipe_1_in = NULL, *pipe_1_out = NULL;
 static char *pipe_2_in = NULL, *pipe_2_out = NULL;
 static struct pcap_fd *pcap;
-static int fd1_in, fd2_in;
+static int fd1_in = -1, fd2_in = -1;
 
 struct pcap_fd {
 	int fd;
@@ -414,7 +414,7 @@ static int setup_fifofd2(void)
 
 int main(int argc, char *argv[])
 {
-	int fifo1, fifo2, ret;
+	int fifo1 = -1, fifo2 = -1, ret;
 	char *pipe1 = "/tmp/ip-15-4-1";
 	char *pipe2 = "/tmp/ip-15-4-2";
 
@@ -481,10 +481,18 @@ int main(int argc, char *argv[])
 	g_main_loop_run(main_loop);
 	ret = 0;
 exit:
-	g_source_remove(fifo1);
-	g_source_remove(fifo2);
-	close(fd1_in);
-	close(fd2_in);
+	if (fifo1 >= 0)
+		g_source_remove(fifo1);
+
+	if (fifo2 >= 0)
+		g_source_remove(fifo2);
+
+	if (fd1_in >= 0)
+		close(fd1_in);
+
+	if (fd2_in >= 0)
+		close(fd2_in);
+
 	g_free(path);
 	g_free(pipe_1_in);
 	g_free(pipe_1_out);
