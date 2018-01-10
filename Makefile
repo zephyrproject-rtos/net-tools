@@ -1,4 +1,4 @@
-all: tunslip6 echo-client echo-server monitor_15_4 coap-client dtls-client dtls-server
+all: tunslip6 echo-client echo-server monitor_15_4 coap-client dtls-client dtls-server throughput-client
 
 tunslip6: tunslip6.o
 	$(CC) -o $@ $(CFLAGS) $(LIBS) tunslip6.c
@@ -8,6 +8,9 @@ echo-client: echo-client.o
 
 echo-server: echo-server.o
 	$(CC) -o $@ $(CFLAGS) $(LIBS) echo-server.c
+
+throughput-client: throughput-client.o
+	$(CC) -o $@ $(CFLAGS) $(LIBS) throughput-client.c
 
 TINYDTLS = tinydtls-0.8.2
 TINYDTLS_CFLAGS = -I$(TINYDTLS) -DDTLSv12 -DWITH_SHA256 -DDTLS_ECC -DDTLS_PSK
@@ -79,4 +82,4 @@ clean-mbedtls:
 	(cd mbedtls-2.4.0; make clean)
 
 clean: clean-libcoap clean-tinydtls clean-mbedtls
-	rm -f *.o tunslip6 tunslip echo-client echo-server dtls-client dtls-server monitor_15_4 coap-client
+	rm -f *.o tunslip6 tunslip echo-client echo-server dtls-client dtls-server monitor_15_4 coap-client throughput-client
