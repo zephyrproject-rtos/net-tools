@@ -104,3 +104,7 @@ tinydtls-0.8.2/ecc/Makefile
 tinydtls-0.8.2/tinydtls.h
 tinydtls-0.8.2/config.status
 tinydtls-0.8.2/doc/doxygen.out
+
+# virtual-hub
+.vscode/
+build/
