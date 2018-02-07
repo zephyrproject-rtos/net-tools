@@ -372,7 +372,7 @@ serial_to_tun(FILE *inslip, int outfd)
   goto read_more;
 }
 
-unsigned char slip_buf[2000];
+unsigned char slip_buf[3028];
 int slip_end, slip_begin;
 
 static void flush_neighbors(const char *tundev)
