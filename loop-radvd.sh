@@ -20,14 +20,37 @@
 PID_DIR=/var/run/radvd
 PID_FILE=$PID_DIR/radvd.pid
 
-if [ ! -f ./radvd.conf ]; then
-    if [ ! -f $ZEPHYR_BASE/../net-tools/radvd.conf ]; then
-	echo "Cannot find radvd.conf file."
+ip link | grep tap0 > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+    CONF_FILE=radvd_slip.conf
+else
+    ip link | grep zeth > /dev/null 2>&1
+    if [ $? -eq 0 ]; then
+	CONF_FILE=radvd_native_posix.conf
+    else
+	echo "Cannot find suitable network interface to run radvd"
+	exit 3
+    fi
+fi
+
+if [ ! -f $CONF_FILE ]; then
+    if [ ! -f $ZEPHYR_BASE/../net-tools/$CONF_FILE ]; then
+	echo "Cannot find $CONF_FILE file."
 	exit 1
     fi
     DIR=$ZEPHYR_BASE/../net-tools
 else
     DIR=.
+fi
+
+if [ ! -f $DIR/$CONF_FILE ] ;then
+    echo "No such config file $DIR/$CONF_FILE found."
+    exit 4
+fi
+
+if [ ! -s $DIR/$CONF_FILE ]; then
+    echo "Config file $DIR/$CONF_FILE is empty."
+    exit 4
 fi
 
 if [ `id -u` != 0 ]; then
@@ -46,5 +69,5 @@ ctrl_c() {
 mkdir -p $PID_DIR
 
 while [ $STOPPED -eq 0 ]; do
-    radvd -n -C $DIR/radvd.conf -m stderr -p $PID_FILE -u root
+    radvd -n -C $DIR/$CONF_FILE -m stderr -p $PID_FILE -u root
 done
