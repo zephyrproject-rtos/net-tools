@@ -17,15 +17,18 @@
 # Run tunslip in a loop. This way we can restart qemu and do not need
 # to manually restart tunslip process that creates the tun0 device.
 
-if [ ! -f ./tunslip6 ]; then
-    if [ ! -f $ZEPHYR_BASE/../net-tools/tunslip6 ]; then
-	echo "Cannot find tunslip6 executable."
-	exit 1
+tunslip_prog=""
+
+for tunslip in ./tunslip6 "${0%/*}/tunslip6"  $ZEPHYR_BASE/../net-tools/tunslip6
+do
+    if [ -x "$tunslip" ]
+    then
+	tunslip_prog="$tunslip"
+	break
     fi
-    DIR=$ZEPHYR_BASE/../net-tools
-else
-    DIR=.
-fi
+done
+
+test -z "$tunslip_prog" && echo "Cannot find tunslip6 executable." && exit 1
 
 if [ `id -u` != 0 ]; then
     echo "Run this script as a root user!"
@@ -40,5 +43,5 @@ ctrl_c() {
 }
 
 while [ $STOPPED -eq 0 ]; do
-    $DIR/tunslip6 -T -s /tmp/slip.dev 2001:db8::1/64 $@
+    "$tunslip_prog" -T -s /tmp/slip.dev 2001:db8::1/64 $@
 done
