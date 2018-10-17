@@ -74,6 +74,47 @@ Be sure to use Python 3, as it requires a function from the socket module
 that's only available in this version (wrapper around if_nametoindex(3)).
 
 
+## Using net-setup.sh script to setup host side ethernet interface
+
+The net-setup.sh script can setup an ethernet interface to the host.
+User is able to setup a configuration file that will contain
+commands to setup IP addresses and routes to the host interface.
+This net-setup.sh script will need to be run as a root user.
+
+If no parameters are given, then "zeth" network interface and "zeth.conf"
+configuration file are used. The script waits until user presses CTRL-c
+and then removes the network interface.
+```
+$ net-setup.sh
+```
+```
+$ net-setup.sh --config zeth-vlan.conf
+```
+```
+$ net-setup.sh --config my-own-config.conf --iface foobar
+```
+
+It is also possible to let the script return and then stop the network
+interface later. Is can be done by first creating the interface with
+"start" or "up" command, and then later remove the interface with
+"stop" or "down" command.
+```
+$ net-setup.sh start
+do your things here
+$ net-setup.sh stop
+```
+```
+$ net-setup.sh --config my-own-config.conf up
+do your things here
+$ net-setup.sh --config my-own-config.conf down
+```
+
+Any extra parameters that the script does not know, are passed directly
+to "ip" command.
+```
+$ net-setup.sh --config my-own-config.conf --iface foo user bar
+```
+
 ## Using encrypted SSL link with echo-* programs
 
 Install stunnel
