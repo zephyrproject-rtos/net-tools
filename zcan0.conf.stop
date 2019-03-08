@@ -1,0 +1,6 @@
+# Configuration file for removing a network interface.
+
+INTERFACE="$1"
+
+ip link set $INTERFACE down
+ip link delete $INTERFACE
