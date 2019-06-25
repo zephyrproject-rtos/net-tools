@@ -195,3 +195,27 @@ Example:
 ```
 CONFIG_MBEDTLS_HEAP_SIZE=30000
 ```
+
+## PPP Connectivity
+
+You can test the PPP connectivity running in Qemu in Zephyr using pppd that is
+running in Linux host. You need to run *socat* and *pppd* to create
+a minimally working network setup.
+
+There are convenience scripts (_loop-ppp-dev.sh_ and _loop-pppd.sh_) for
+running socat and pppd processes. For running these, you need two
+terminals.
+
+Terminal 1:
+```
+$ ./loop-ppp-dev.sh
+```
+
+Terminal 2:
+```
+$ sudo ./loop-pppd.sh
+```
+
+After this, start PPP enabled Zephyr application. For example Zephyr
+*echo-server* sample in samples/net/sockets/echo_server has _overlay-ppp.conf_
+file that enables PPP support.
