@@ -62,6 +62,7 @@ if [ `id -u` != 0 ]; then
 fi
 
 IFACE=zeth
+PIDFILE="/tmp/.${IFACE}.pidfile"
 
 # Default config file setups default connectivity IP addresses
 CONF_FILE=./zeth.conf
@@ -116,6 +117,10 @@ if [ "$ACTION" != stop ]; then
     echo "Creating $IFACE"
     ip tuntap add $IFACE mode tap $@
 
+    if [ -f "$PIDFILE" -a -s "$PIDFILE" -a ! -h "$PIDFILE" ]; then
+	rm "$PIDFILE" > /dev/null 2>&1
+    fi
+
     # The idea is that the configuration file will setup
     # the IP addresses etc. for the created interface.
     . "$CONF_FILE" $IFACE
@@ -132,4 +137,11 @@ if [ "$ACTION" != start ]; then
 
     echo "Removing $IFACE"
     ip tuntap del $IFACE mode tap
+
+    if [ -f "$PIDFILE" -a -s "$PIDFILE" -a ! -h "$PIDFILE" ]; then
+	PID=`cat $PIDFILE | head -1 | awk '{ print $1 }'`
+	rm "$PIDFILE" > /dev/null 2>&1
+	echo "Killing `ps --pid $PID -o comm=` ($PID)"
+	kill $PID
+    fi
 fi
