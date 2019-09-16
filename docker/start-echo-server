@@ -1,0 +1,3 @@
+#!/bin/sh
+
+/net-tools/echo-server -i eth0 $*

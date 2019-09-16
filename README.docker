@@ -1,0 +1,30 @@
+# Testing with net-tools and Docker
+
+* Create Docker image
+
+	docker build -t net-tools .
+
+* Run Docker image
+
+  Interactively:
+
+	docker run --hostname=zephyr --expose=4242 --name=net-tools \
+	       --rm -it --network=host net-tools sh
+
+  Non-interactively
+
+	docker run --hostname=zephyr --expose=4242 --name=net-tools \
+	       --rm -dt --network=host net-tools sh
+
+* Setup network interfaces, IP addresses and routes
+
+	./net-setup.sh --config docker.conf
+
+* Run Qemu / native-posix image
+
+	make -C build run
+
+* Execute tests like echo-client
+
+	docker container exec net-tools /net-tools/echo-client 2001:db8::1
+	docker container exec net-tools /net-tools/echo-client -t 2001:db8::1
