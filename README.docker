@@ -1,0 +1,54 @@
+# Testing with net-tools and Docker
+
+* Create Docker image
+
+	cd docker/
+	docker build -t net-tools .
+
+* Setup network interfaces, IP addresses and routes
+
+	./net-setup.sh --config docker.conf
+
+* Run Docker image
+
+  Set the docker internal network name to the value $DOCKER_USER_INTERFACE
+  in docker.config above, default is 'net-tools0'. The bridge network that
+  docker creates will be printed on standard out, it's bridge interface
+  name will be br-XXXXXXXXXXXX. Check that the IPv4 and IPv6 addresses
+  given on the docker command line match the subnets in 'docker.conf'.
+
+  Interactively:
+
+	docker run --hostname=zephyr --name=net-tools \
+	       --ip=192.0.2.2 --ip6=2001:db8::2 \
+	       --rm -it --network=net-tools0 net-tools sh
+
+        exit with Ctrl-p ctrl-q to execute tests from the command line
+
+  Non-interactively
+
+	docker run --hostname=zephyr --name=net-tools \
+	       --ip=192.0.2.2 --ip6=2001:db8::2 \
+	       --rm -dt --network=net-tools0 net-tools sh
+
+* Run Qemu / native-posix image
+
+	rm -rf build && mkdir build
+
+	cmake -GNinja -DBOARD=native_posix -B build
+	   or
+	cmake -GNinja -DBOARD=qemu_x86 -DOVERLAY_CONFIG=overlay-e1000.conf \
+	   -B build
+
+	ninja -C build run
+
+* Execute tests like echo-client
+
+	docker container exec net-tools /net-tools/echo-client 2001:db8::1
+	docker container exec net-tools /net-tools/echo-client -t 2001:db8::1
+	docker container exec net-tools /net-tools/echo-client 192.0.2.1
+	docker container exec net-tools /net-tools/echo-client -t 192.0.2.1
+
+* Remove the 'net-tools0' docker network:
+
+	docker network rm net-tools0
