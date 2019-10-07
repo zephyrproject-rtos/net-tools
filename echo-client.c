@@ -28,6 +28,8 @@
 #include <ifaddrs.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <sys/time.h>
+#include <signal.h>
 
 #define SERVER_PORT  4242
 #define CLIENT_PORT  0
@@ -42,6 +44,8 @@ static const unsigned char A[] = { 'A' };
 static const unsigned char null_byte[] = { 0x00 };
 static const unsigned char foobar[] = { 'f','o','o','b','a','r' };
 static const unsigned char small_binary[] = { 0x20, 0xff, 0x00, 0x56 };
+
+static bool do_exit;
 
 /* Next entry is 1280 bytes long which is the maximum length the IP stack
  * can support.
@@ -383,6 +387,41 @@ static int get_address(const char *if_name, int family, void *address)
 	return err;
 }
 
+static int timeval_diff(struct timeval *start,
+			struct timeval *end,
+			struct timeval *result)
+{
+	struct timeval temp_start = *start;
+	struct timeval temp_end = *end;
+
+	start = &temp_start;
+	end = &temp_end;
+
+	if (start->tv_usec > 999999) {
+		start->tv_sec += start->tv_usec / 1000000;
+		start->tv_usec %= 1000000;
+	}
+
+	if (end->tv_usec > 999999) {
+		end->tv_sec += end->tv_usec / 1000000;
+		end->tv_usec %= 1000000;
+	}
+
+	result->tv_sec = start->tv_sec - end->tv_sec;
+
+	if ((result->tv_usec = (start->tv_usec - end->tv_usec)) < 0) {
+		result->tv_usec += 1000000;
+		result->tv_sec--;
+	}
+
+	return result->tv_sec < 0;
+}
+
+static void signal_handler(int sig)
+{
+	do_exit = true;
+}
+
 extern int optind, opterr, optopt;
 extern char *optarg;
 
@@ -407,6 +446,9 @@ int main(int argc, char**argv)
 	int ifindex = -1, optval = 1;
 	void *address = NULL;
 	bool forever = false, help = false, tcp = false, do_reverse = false;
+	struct timeval start_time, end_time, diff_time;
+	unsigned long long sum_time = 0ULL;
+	int count_time = 0;
 
 	opterr = 0;
 
@@ -454,6 +496,9 @@ int main(int argc, char**argv)
 		       "   The -F option will stress test the server.\n");
 		exit(-EINVAL);
 	}
+
+	signal(SIGINT, signal_handler);
+	signal(SIGTERM, signal_handler);
 
 	if (inet_pton(AF_INET6, target, &addr6_send.sin6_addr) != 1) {
 		if (inet_pton(AF_INET, target, &addr4_send.sin_addr) != 1) {
@@ -566,6 +611,8 @@ again:
 			int pos = 0;
 			sent = 0;
 
+			gettimeofday(&start_time, NULL);
+
 			if (tcp) {
 				pos = 0;
 
@@ -598,7 +645,10 @@ again:
 
 			ret = select(fd + 1, &rfds, NULL, NULL, &tv);
 			if (ret < 0) {
-				perror("select");
+				if (!do_exit) {
+					perror("select");
+				}
+
 				goto out;
 			} else if (ret == 0) {
 				if (data[i].expecting_reply) {
@@ -650,6 +700,13 @@ again:
 				ret = i;
 				goto out;
 			} else {
+				gettimeofday(&end_time, NULL);
+				timeval_diff(&start_time, &end_time,
+					     &diff_time);
+				sum_time += diff_time.tv_sec * 100000 +
+					diff_time.tv_usec;
+				count_time++;
+
 				printf(".");
 				fflush(stdout);
 			}
@@ -660,9 +717,12 @@ again:
 		if (flood)
 			i = 0;
 
+		if (do_exit)
+			break;
+
 	} while (flood);
 
-	if (forever) {
+	if (forever && !do_exit) {
 		i = 0;
 		goto again;
 	}
@@ -672,6 +732,17 @@ again:
 	printf("\n");
 
 out:
+	if (count_time > 0) {
+		if (do_exit) {
+			printf("\n");
+		}
+
+		printf("Average round trip %lld ms\n",
+		       (unsigned long long)((((double)sum_time /
+					      (double)count_time)) /
+					    1000.0));
+	}
+
 	close(fd);
 
 	exit(ret);
