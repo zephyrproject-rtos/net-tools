@@ -267,7 +267,6 @@ static struct {
 	ENTRY_OK(lorem_ipsum),
 	ENTRY_OK(null_byte),
 	ENTRY_OK(array_256),
-	ENTRY_FAIL(array_1280), /* too long message will be discarded */
 
 	{ 0, 0 }
 };
@@ -640,8 +639,14 @@ again:
 
 			FD_ZERO(&rfds);
 			FD_SET(fd, &rfds);
-			tv.tv_sec = MAX_TIMEOUT;
-			tv.tv_usec = 0;
+
+			if (data[i].expecting_reply) {
+				tv.tv_sec = MAX_TIMEOUT;
+				tv.tv_usec = 0;
+			} else {
+				tv.tv_sec = 0;
+				tv.tv_usec = 0;
+			}
 
 			ret = select(fd + 1, &rfds, NULL, NULL, &tv);
 			if (ret < 0) {
