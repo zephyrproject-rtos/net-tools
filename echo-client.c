@@ -409,7 +409,7 @@ static int timeval_diff(struct timeval *start,
 
 	result->tv_sec = start->tv_sec - end->tv_sec;
 
-	if ((result->tv_usec = (start->tv_usec - end->tv_usec)) < 0) {
+	if ((result->tv_usec = (end->tv_usec - start->tv_usec)) < 0) {
 		result->tv_usec += 1000000;
 		result->tv_sec--;
 	}
@@ -733,14 +733,20 @@ again:
 
 out:
 	if (count_time > 0) {
+		unsigned long long time_spent;
+
 		if (do_exit) {
 			printf("\n");
 		}
 
-		printf("Average round trip %lld ms\n",
-		       (unsigned long long)((((double)sum_time /
-					      (double)count_time)) /
-					    1000.0));
+		time_spent = (unsigned long long)(((double)sum_time /
+						   (double)count_time));
+		if ((time_spent / 1000) == 0) {
+			printf("Average round trip %lld us\n", time_spent);
+		} else {
+			printf("Average round trip %lld ms\n",
+			       time_spent / 1000);
+		}
 	}
 
 	close(fd);
