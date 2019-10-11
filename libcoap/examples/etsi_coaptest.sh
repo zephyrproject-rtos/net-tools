@@ -36,6 +36,7 @@ testgroups=( CORE LINK BLOCK OBS )
 testnumber=-1
 group=''
 
+cd "$(dirname $0)"
 source etsi_testcases.sh
 
 function usage {
