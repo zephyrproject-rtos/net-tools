@@ -448,6 +448,7 @@ int main(int argc, char**argv)
 	struct timeval start_time, end_time, diff_time;
 	unsigned long long sum_time = 0ULL;
 	int count_time = 0;
+	unsigned long pkt_counter = 0;
 
 	opterr = 0;
 
@@ -711,6 +712,7 @@ again:
 				sum_time += diff_time.tv_sec * 100000 +
 					diff_time.tv_usec;
 				count_time++;
+				pkt_counter++;
 
 				printf(".");
 				fflush(stdout);
@@ -752,6 +754,8 @@ out:
 			printf("Average round trip %lld ms\n",
 			       time_spent / 1000);
 		}
+
+		printf("Sent %lu packets\n", pkt_counter);
 	}
 
 	close(fd);
