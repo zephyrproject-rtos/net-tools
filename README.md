@@ -165,6 +165,46 @@ $ openssl pkcs8 -topk8 -inform PEM -outform DER -nocrypt \
     sed 's/0x  ,//g'
 ```
 
+If you want to re-create the signed certificates in echo-server in Zephyr
+net samples and echo-client in net-tools, then they can be created like this
+(note that you do not need to do this as the certs have been prepared already
+in echo-server and echo-client sources):
+```
+CA
+--
+$ openssl genrsa -out ca_privkey.pem 2048
+$ openssl req -new -x509 -days 36500 -key ca_privkey.pem -out ca.crt -subj "/CN=exampleCA"
+
+Convert to DER format
+$ openssl x509 -in ca.crt -outform DER -out ca.der
+```
+
+```
+Client
+------
+$ openssl genrsa -out client_privkey.pem 2048
+$ openssl req -new -key client_privkey.pem -out client.csr -subj "/CN=exampleClient"
+$ openssl x509 -req -CA ca.crt -CAkey ca_privkey.pem -days 36500 -in client.csr -CAcreateserial -out client.crt
+```
+
+```
+Server
+------
+$ openssl genrsa -out server_privkey.pem 2048
+$ openssl req -new -key server_privkey.pem -out server.csr -subj "/CN=localhost"
+$ openssl x509 -req -CA ca.crt -CAkey ca_privkey.pem -days 36500 -in server.csr -CAcreateserial -out server.crt
+
+Convert to DER format
+$ openssl x509 -in server.crt -outform DER -out server.der
+$ openssl pkcs8 -topk8 -inform PEM -outform DER -nocrypt -in server_privkey.pem -out server_privkey.der
+```
+
+Copy ca.crt, client.crt and client_privkey.pem to net-tools.
+Copy ca.der, server.der and server_privkey.der to samples/net/sockets/echo-server/src/.
+
+Enable NET_SAMPLE_CERTS_WITH_SC in samples/net/sockets/echo-server and build the sample.
+Use stunnel_sc.conf in stunnel.sh to run echo-client with signed certificates.
+
 ## Using DTLS link with echo-* programs
 
 For DTLS client functionality, you can do this
