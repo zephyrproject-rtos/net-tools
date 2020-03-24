@@ -18,6 +18,8 @@ RUN git clone https://github.com/eclipse/mosquitto.git && \
     install -d /usr/local/bin/ && \
     install -d /usr/local/sbin/ && \
     install -d /usr/local/lib/ && \
+    install -d /usr/local/etc/mosquitto/certs && \
+    install -d /var/lib/mosquitto && \
     install -s -m755 /mosquitto/client/mosquitto_pub \
 	       /usr/local/bin/mosquitto_pub && \
     install -s -m755 /mosquitto/client/mosquitto_rr \
@@ -39,8 +41,8 @@ RUN addgroup --system mosquitto && \
     --ingroup mosquitto \
     mosquitto
 
-COPY mosquitto.conf /usr/local/etc/
-COPY mosquitto-tls.conf /usr/local/etc/
+COPY mosquitto.conf /usr/local/etc/mosquitto/
+COPY mosquitto-tls.conf /usr/local/etc/mosquitto/
 
 WORKDIR /net-tools
 
