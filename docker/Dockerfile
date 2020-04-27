@@ -44,6 +44,11 @@ RUN addgroup --system mosquitto && \
 COPY mosquitto.conf /usr/local/etc/mosquitto/
 COPY mosquitto-tls.conf /usr/local/etc/mosquitto/
 
+# RUN http_proxy=... apt...
+RUN apt update && apt install dante-server -y
+
+COPY danted.conf /etc/
+
 WORKDIR /net-tools
 
 # We do not run any command automatically but let the test script run
