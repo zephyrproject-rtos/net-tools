@@ -386,36 +386,6 @@ static int get_address(const char *if_name, int family, void *address)
 	return err;
 }
 
-static int timeval_diff(struct timeval *start,
-			struct timeval *end,
-			struct timeval *result)
-{
-	struct timeval temp_start = *start;
-	struct timeval temp_end = *end;
-
-	start = &temp_start;
-	end = &temp_end;
-
-	if (start->tv_usec > 999999) {
-		start->tv_sec += start->tv_usec / 1000000;
-		start->tv_usec %= 1000000;
-	}
-
-	if (end->tv_usec > 999999) {
-		end->tv_sec += end->tv_usec / 1000000;
-		end->tv_usec %= 1000000;
-	}
-
-	result->tv_sec = start->tv_sec - end->tv_sec;
-
-	if ((result->tv_usec = (end->tv_usec - start->tv_usec)) < 0) {
-		result->tv_usec += 1000000;
-		result->tv_sec--;
-	}
-
-	return result->tv_sec < 0;
-}
-
 static void signal_handler(int sig)
 {
 	do_exit = true;
@@ -447,8 +417,8 @@ int main(int argc, char**argv)
 	bool forever = false, help = false, tcp = false, do_reverse = false;
 	struct timeval start_time, end_time, diff_time;
 	unsigned long long sum_time = 0ULL;
-	int count_time = 0;
-	unsigned long pkt_counter = 0;
+	unsigned long long count_time = 0ULL;
+	unsigned long long pkt_counter = 0ULL;
 
 	opterr = 0;
 
@@ -708,10 +678,13 @@ again:
 				goto out;
 			} else {
 				gettimeofday(&end_time, NULL);
-				timeval_diff(&start_time, &end_time,
-					     &diff_time);
-				sum_time += diff_time.tv_sec * 100000 +
-					diff_time.tv_usec;
+
+				timersub(&end_time, &start_time, &diff_time);
+
+				sum_time +=
+					(unsigned long long)diff_time.tv_sec *
+					1000000ULL +
+					(unsigned long long)diff_time.tv_usec;
 				count_time++;
 				pkt_counter++;
 
@@ -740,23 +713,24 @@ again:
 	printf("\n");
 
 out:
-	if (count_time > 0) {
+	if (count_time > 0ULL) {
 		unsigned long long time_spent;
+		unsigned long long ms;
 
 		if (do_exit) {
 			printf("\n");
 		}
 
-		time_spent = (unsigned long long)(((double)sum_time /
-						   (double)count_time));
-		if ((time_spent / 1000) == 0) {
-			printf("Average round trip %lld us\n", time_spent);
+		time_spent = sum_time / count_time;
+		ms = time_spent / 1000ULL;
+
+		if (ms == 0) {
+			printf("Average round trip %llu us\n", time_spent);
 		} else {
-			printf("Average round trip %lld ms\n",
-			       time_spent / 1000);
+			printf("Average round trip %llu ms\n", ms);
 		}
 
-		printf("Sent %lu packets\n", pkt_counter);
+		printf("Sent %llu packets\n", pkt_counter);
 	}
 
 	close(fd);
