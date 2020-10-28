@@ -680,7 +680,7 @@ again:
 				do {
 					ret = read(fd, buf + pos,
 						   sizeof(buf) - pos);
-					if (ret < 0)
+					if (ret <= 0)
 						break;
 
 					received += ret;
@@ -690,7 +690,8 @@ again:
 			} else
 				ret = recv(fd, buf, sizeof(buf), 0);
 			if (ret <= 0) {
-				perror("recv");
+				if (ret)
+					perror("recv");
 				ret = -EINVAL;
 				goto out;
 			}
