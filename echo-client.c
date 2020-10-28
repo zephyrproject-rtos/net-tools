@@ -28,13 +28,15 @@
 #include <ifaddrs.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/time.h>
 #include <signal.h>
 
 #define SERVER_PORT  4242
 #define CLIENT_PORT  0
-#define MAX_BUF_SIZE 1280	/* min IPv6 MTU, the actual data is smaller */
 #define MAX_TIMEOUT  5		/* in seconds */
+
+#define MIN(a,b) (((a) < (b)) ? (a) : (b))
 
 #define ENTRY(e, expect_result) { sizeof(e), e, expect_result }
 #define ENTRY_OK(e) ENTRY(e, true)
@@ -47,13 +49,13 @@ static const unsigned char small_binary[] = { 0x20, 0xff, 0x00, 0x56 };
 
 static bool do_exit;
 
-/* Next entry is 1280 bytes long which is the maximum length the IP stack
- * can support.
- */
+/* Generated 2 paragraphs, 221 words, 1500 bytes of Lorem Ipsum */
 static const unsigned char lorem_ipsum[] = \
-	"Lorem ipsum dolor sit amet, consectetur adipiscing elit. Etiam congue non neque vel tempor. In id porta nibh, ut cursus tortor. Morbi eleifend tristique vehicula. Nunc vitae risus mauris. Praesent vel imperdiet dolor, et ultricies nibh. Aliquam erat volutpat. Maecenas pellentesque dolor vitae dictum tincidunt. Fusce vel nibh nec leo tristique auctor eu a massa. Nam et tellus ac tortor sollicitudin semper vitae nec tortor. Aliquam nec lacus velit. Maecenas ornare ullamcorper justo non auctor. Donec aliquam feugiat turpis, quis elementum sem rutrum ut. Sed eu ullamcorper libero, ut suscipit magna."
+	"Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed a lacinia ligula. Duis maximus ac turpis in sollicitudin. Nam luctus porta finibus. Duis id suscipit turpis. Ut ac venenatis urna. Phasellus nec elementum lectus. Interdum et malesuada fames ac ante ipsum primis in faucibus. Pellentesque id ultrices lacus. Aenean sapien orci, eleifend eu imperdiet vitae, fringilla sed felis. Sed sit amet consequat nibh, nec rhoncus ipsum. Praesent in tellus in ligula dapibus feugiat. Aliquam at lectus pulvinar, viverra sem, dignissim turpis. Pellentesque quis sagittis leo."
 	"\n"
-	"Donec vehicula magna ut varius aliquam. Ut vitae commodo nulla, quis ornare dolor. Nulla tortor sem, venenatis eu iaculis id, commodo ut massa. Sed est lorem, euismod vitae enim sed, hendrerit gravida felis. Donec eros lacus, auctor ut ultricies eget, lobortis quis nisl. Aliquam sit amet blandit eros. Interdum et malesuada fames ac ante ipsum primis in faucibus. Quisque egestas nisl leo, sed consectetur leo ornare eu. Suspendisse vitae urna vel purus maximus finibus. Proin sed sollicitudin turpis. Mauris interdum neque eu tellus pellentesque, id fringilla nisi fermentum. Suspendisse gravida pharetra sodales orci aliquam\n";
+	"Ut eget neque quis nisi volutpat consectetur. Curabitur faucibus metus non arcu pharetra, et aliquam mi molestie. Fusce commodo purus a arcu porta blandit. Integer blandit posuere urna vitae feugiat. Mauris mollis tempus nulla. Aliquam quis lacinia justo, at pellentesque purus. Integer commodo, mi et egestas scelerisque, arcu orci convallis turpis, et blandit dui ante ut turpis. In metus ipsum, imperdiet ut dignissim ac, scelerisque quis purus. Mauris mattis mattis fermentum. Suspendisse a suscipit mi, in interdum massa. Duis magna mi, lacinia bibendum faucibus in, consequat in nisl. Praesent nibh mi, ullamcorper vel fringilla quis, scelerisque eu magna. Vestibulum ipsum purus, eleifend ac mi at, volutpat fermentum sapien. Etiam maximus tortor elementum egestas varius. Aenean sagittis lectus sapien, sed commodo dui consectetur id. Praesent imperdiet, risus at feugiat sodales, elit ex aliquet dui, quis porttitor.\n";
+
+#define MAX_BUF_SIZE sizeof(lorem_ipsum)
 
 /* 256 bytes of binary data */
 static const unsigned char array_256[] = {
@@ -271,17 +273,6 @@ static struct {
 	{ 0, 0 }
 };
 
-static inline void reverse(unsigned char *buf, int len)
-{
-	int i, last = len - 1;
-
-	for(i = 0; i < len/2; i++) {
-		unsigned char tmp = buf[i];
-		buf[i] = buf[last - i];
-		buf[last - i] = tmp;
-	}
-}
-
 static int get_ifindex(const char *name)
 {
 	struct ifreq ifr;
@@ -414,7 +405,7 @@ int main(int argc, char**argv)
 	struct timeval tv = {};
 	int ifindex = -1, optval = 1;
 	void *address = NULL;
-	bool forever = false, help = false, tcp = false, do_reverse = false;
+	bool forever = false, help = false, tcp = false, do_randomize = false;
 	struct timeval start_time, end_time, diff_time;
 	unsigned long long sum_time = 0ULL;
 	unsigned long long count_time = 0ULL;
@@ -422,7 +413,7 @@ int main(int argc, char**argv)
 
 	opterr = 0;
 
-	while ((c = getopt(argc, argv, "Fi:p:eth")) != -1) {
+	while ((c = getopt(argc, argv, "Fi:p:ethr")) != -1) {
 		switch (c) {
 		case 'F':
 			flood = true;
@@ -440,7 +431,9 @@ int main(int argc, char**argv)
 			port = atoi(optarg);
 			break;
 		case 'r':
-			do_reverse = true;
+			gettimeofday(&start_time, NULL);
+			srandom(start_time.tv_usec);
+			do_randomize = true;
 			break;
 		case 'h':
 			help = true;
@@ -459,8 +452,7 @@ int main(int argc, char**argv)
 		printf("-e Do not quit, send packets forever\n");
 		printf("-t Use TCP, default is to use UDP only\n");
 		printf("-p Use this port, default port is %d\n", SERVER_PORT);
-		printf("-r Check data by reversing it (needed when checking "
-		       "legacy stack\n");
+		printf("-r Send random packet lengths\n");
 		printf("-F (flood) option will prevent the client from "
 		       "waiting the data.\n"
 		       "   The -F option will stress test the server.\n");
@@ -578,26 +570,52 @@ again:
 		int sent;
 
 		while (data[i].buf) {
+			const unsigned char *buf_ptr;
 			int pos = 0;
+			int len;
+
 			sent = 0;
 
 			gettimeofday(&start_time, NULL);
+
+			if (do_randomize) {
+				buf_ptr = lorem_ipsum;
+
+				/* For UDP, we send max 1280 bytes which is
+				 * the IPv6 MTU size
+				 */
+				if (tcp)
+					len = random() % sizeof(lorem_ipsum);
+				else
+					len = random() %
+						MIN(1280, sizeof(lorem_ipsum));
+
+				if (len == 0)
+					len = 1;
+			} else {
+				if (tcp)
+					len = data[i].len;
+				else
+					len = MIN(1280, data[i].len);
+
+				buf_ptr = data[i].buf;
+			}
 
 			if (tcp) {
 				pos = 0;
 
 				do {
-					ret = write(fd, &data[i].buf[pos],
-						    data[i].len - pos);
+					ret = write(fd, &buf_ptr[pos],
+						    len - pos);
 					if (ret <= 0)
 						break;
 
-					sent += data[i].len;
+					sent += len;
 					pos += ret;
-				} while (sent < data[i].len);
+				} while (sent < len);
 			} else
-				ret = sendto(fd, data[i].buf, data[i].len, 0,
-					     addr_send, addr_len);
+				ret = sendto(fd, buf_ptr, len, 0, addr_send,
+					     addr_len);
 			if (ret < 0) {
 				perror("send");
 				goto out;
@@ -611,7 +629,7 @@ again:
 			FD_ZERO(&rfds);
 			FD_SET(fd, &rfds);
 
-			if (data[i].expecting_reply) {
+			if (do_randomize || data[i].expecting_reply) {
 				tv.tv_sec = MAX_TIMEOUT;
 				tv.tv_usec = 0;
 			} else {
@@ -627,6 +645,11 @@ again:
 
 				goto out;
 			} else if (ret == 0) {
+				if (do_randomize) {
+					timeout++;
+					continue;
+				}
+
 				if (data[i].expecting_reply) {
 					fprintf(stderr,
 						"Timeout while waiting "
@@ -662,15 +685,15 @@ again:
 			if (ret <= 0) {
 				if (ret)
 					perror("recv");
+				else
+					printf("Connection closed by peer.\n");
+
 				ret = -EINVAL;
 				goto out;
 			}
 
-			if (!tcp && do_reverse)
-				reverse(buf, ret);
-
-			if (data[i].len != ret ||
-			    memcmp(data[i].buf, buf, ret) != 0) {
+			if (len != ret ||
+			    memcmp(buf_ptr, buf, ret) != 0) {
 				fprintf(stderr,
 					"Check failed idx %d len %d\n",
 					i, ret);
@@ -689,7 +712,13 @@ again:
 				pkt_counter++;
 
 				printf(".");
-				fflush(stdout);
+
+				/* Flush stdout only every 10 packets */
+				if (forever) {
+					if (!(pkt_counter % 10))
+						fflush(stdout);
+				} else
+					fflush(stdout);
 			}
 
 			i++;
@@ -731,6 +760,8 @@ out:
 		}
 
 		printf("Sent %llu packets\n", pkt_counter);
+	} else {
+		printf("No packets sent!\n");
 	}
 
 	close(fd);
