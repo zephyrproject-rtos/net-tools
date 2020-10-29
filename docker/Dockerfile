@@ -49,9 +49,19 @@ RUN apt update && apt install dante-server -y
 
 COPY danted.conf /etc/
 
+
 # Simple Python based HTTP server for http-client API testing
 COPY http-server.py /usr/local/bin
 COPY https-server.py /usr/local/bin
+
+# RUN https_proxy=... git clone...
+RUN git clone https://git.code.sf.net/p/linuxptp/code linuxptp && \
+    cd /linuxptp && \
+    git checkout v3.1 && \
+    make && \
+    make install
+
+COPY gptp.cfg /etc/
 
 WORKDIR /net-tools
 
