@@ -49,6 +49,10 @@ RUN apt update && apt install dante-server -y
 
 COPY danted.conf /etc/
 
+# Simple Python based HTTP server for http-client API testing
+COPY http-server.py /usr/local/bin
+COPY https-server.py /usr/local/bin
+
 WORKDIR /net-tools
 
 # We do not run any command automatically but let the test script run
