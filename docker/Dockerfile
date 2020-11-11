@@ -63,6 +63,10 @@ RUN git clone https://git.code.sf.net/p/linuxptp/code linuxptp && \
 
 COPY gptp.cfg /etc/
 
+# Run curl to get data from dumb_http_server_mt network sample
+RUN apt update && apt install curl netcat -y
+COPY http-get-file-test.sh /usr/local/bin
+
 WORKDIR /net-tools
 
 # We do not run any command automatically but let the test script run
