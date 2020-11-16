@@ -3,14 +3,28 @@
 
 FROM gcc
 
-# RUN https_proxy=... git clone...
+# Get all the extra app we need in the container
+RUN apt update && apt install -y \
+    dante-server \
+    curl \
+    netcat
+
+# We need the net-tools project as it contains helper apps needed
+# in testing.
 RUN git clone https://github.com/zephyrproject-rtos/net-tools.git && \
     cd /net-tools && \
     make tunslip6 && make echo-client && \
     make echo-server && make throughput-client && \
     make coap-client
 
-# RUN https_proxy=... git clone...
+# linuxptp daemon is needed in gPTP testing
+RUN git clone https://git.code.sf.net/p/linuxptp/code linuxptp && \
+    cd /linuxptp && \
+    git checkout v3.1 && \
+    make && \
+    make install
+
+# MQTT testing
 RUN git clone https://github.com/eclipse/mosquitto.git && \
     cd /mosquitto && \
     git checkout v1.6.9 && \
@@ -31,41 +45,24 @@ RUN git clone https://github.com/eclipse/mosquitto.git && \
     install -s -m755 /mosquitto/src/mosquitto /usr/local/sbin/mosquitto && \
     install -s -m755 /mosquitto/src/mosquitto_passwd \
 	       /usr/local/bin/mosquitto_passwd && \
-    rm -rf /mosquitto
-
-RUN addgroup --system mosquitto && \
+    rm -rf /mosquitto; \
+    addgroup --system mosquitto && \
     adduser --system \
-    --no-create-home \
-    --disabled-password \
-    --disabled-login \
-    --ingroup mosquitto \
-    mosquitto
+	    --no-create-home \
+	    --disabled-password \
+	    --disabled-login \
+	    --ingroup mosquitto \
+	    mosquitto
 
-COPY mosquitto.conf /usr/local/etc/mosquitto/
-COPY mosquitto-tls.conf /usr/local/etc/mosquitto/
-
-# RUN http_proxy=... apt...
-RUN apt update && apt install dante-server -y
-
-COPY danted.conf /etc/
-
+COPY mosquitto.conf mosquitto-tls.conf /usr/local/etc/mosquitto/
 
 # Simple Python based HTTP server for http-client API testing
-COPY http-server.py /usr/local/bin
-COPY https-server.py /usr/local/bin
+# The http-get-file-test.sh is used for testing TCP with dumb-http-server-mt
+# network sample.
+COPY http-server.py https-server.py http-get-file-test.sh /usr/local/bin/
 
-# RUN https_proxy=... git clone...
-RUN git clone https://git.code.sf.net/p/linuxptp/code linuxptp && \
-    cd /linuxptp && \
-    git checkout v3.1 && \
-    make && \
-    make install
-
-COPY gptp.cfg /etc/
-
-# Run curl to get data from dumb_http_server_mt network sample
-RUN apt update && apt install curl netcat -y
-COPY http-get-file-test.sh /usr/local/bin
+# Dante is SOCKS proxy. The gptp.conf is conf file for linuxptp.
+COPY danted.conf gptp.cfg /etc/
 
 WORKDIR /net-tools
 
