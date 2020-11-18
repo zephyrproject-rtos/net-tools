@@ -7,7 +7,8 @@ FROM gcc
 RUN apt update && apt install -y \
     dante-server \
     curl \
-    netcat
+    netcat \
+    tcpdump
 
 # We need the net-tools project as it contains helper apps needed
 # in testing.
