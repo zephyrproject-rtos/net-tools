@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 
 # HTTPS server test application.
 #
@@ -15,16 +15,16 @@
 #
 
 import socket
-from BaseHTTPServer import HTTPServer
-from SimpleHTTPServer import SimpleHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import ssl
+import sys
 
 PORT = 4443
 
 class HTTPServerV6(HTTPServer):
     address_family = socket.AF_INET6
 
-class RequestHandler(SimpleHTTPRequestHandler):
+class RequestHandler(BaseHTTPRequestHandler):
     length = 0
 
     def _set_headers(self):
@@ -39,13 +39,20 @@ class RequestHandler(SimpleHTTPRequestHandler):
         self._set_headers()
         self.wfile.write(payload)
 
-def main():
-    httpd = HTTPServerV6(("", PORT), RequestHandler)
-    print "Serving at port", PORT
-    httpd.socket = ssl.wrap_socket(httpd.socket,
-                                   certfile='/net-tools/https-server.pem',
-                                   server_side=True)
+def main(address):
+    if ':' in address:
+        httpd = HTTPServerV6((address, PORT), RequestHandler)
+    else:
+        httpd = HTTPServer((address, PORT), RequestHandler)
+
+    print("Serving at port", PORT)
+    httpd.socket = ssl.wrap_socket (httpd.socket,
+                                    certfile='/net-tools/https-server.pem',
+                                    server_side=True)
     httpd.serve_forever()
 
 if __name__ == '__main__':
-    main()
+    if len(sys.argv) > 1:
+        main(sys.argv[1])
+    else:
+        main('::')
