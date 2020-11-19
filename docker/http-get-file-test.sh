@@ -9,6 +9,14 @@
 # HTTP because this sample does not implement HTTP server but always returns
 # a static file.
 
+if [ `basename $0` == "https-get-file-test.sh" ]; then
+    PROTO=https
+    EXTRA_OPTS="--insecure"
+else
+    PROTO=http
+    EXTRA_OPTS=""
+fi
+
 SERVER=192.0.2.1
 PORT=8080
 
@@ -41,7 +49,7 @@ ctrl_c() {
 }
 
 while [ $STOPPED -eq 0 ]; do
-    curl http://${SERVER}:${PORT} --max-time 5 --output $DOWNLOAD_FILE
+    curl ${PROTO}://${SERVER}:${PORT} $EXTRA_OPTS --max-time 5 --output $DOWNLOAD_FILE
     STATUS=$?
     if [ $STATUS -ne 0 ]; then
 	if [ $STATUS -eq 28 ]; then
@@ -78,9 +86,9 @@ rm -f $DOWNLOAD_FILE $MD5SUM_FILE
 
 if [ $CONNECTION_TIMEOUT -eq 0 ]; then
     if [ $STATUS -eq 0 ]; then
-	printf "OK\r\n\r\n" | nc $SERVER $PORT
+	curl -d "OK" -X POST $EXTRA_OPTS ${PROTO}://${SERVER}:${PORT}
     else
-	printf "FAIL\r\n\r\n" | nc $SERVER $PORT
+	curl -d "FAIL" -X POST $EXTRA_OPTS ${PROTO}://${SERVER}:${PORT}
     fi
 fi
 
