@@ -60,7 +60,9 @@ COPY mosquitto.conf mosquitto-tls.conf /usr/local/etc/mosquitto/
 # Simple Python based HTTP server for http-client API testing
 # The http-get-file-test.sh is used for testing TCP with dumb-http-server-mt
 # network sample.
-COPY http-server.py https-server.py http-get-file-test.sh /usr/local/bin/
+# The syslog-receiver.py will test syslog-net sample
+COPY http-server.py https-server.py http-get-file-test.sh \
+     syslog-receiver.py /usr/local/bin/
 COPY http-get-file-test.sh /usr/local/bin/https-get-file-test.sh
 
 # Dante is SOCKS proxy. The gptp.conf is conf file for linuxptp.
