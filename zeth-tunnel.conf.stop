@@ -1,0 +1,19 @@
+# Configuration file for setting IP addresses for tunneling network interfaces
+
+INTERFACE="$1"
+
+# Read the "TUNNEL_VxVy" as "Vx over Vy"
+TUNNEL_V4V4=${INTERFACE}-ipip
+TUNNEL_V6V6=${INTERFACE}-ip6ip6
+TUNNEL_V6V4=${INTERFACE}-ip6ip
+TUNNEL_V4V6=${INTERFACE}-ipip6
+
+ip link set ${TUNNEL_V4V4} down
+ip link set ${TUNNEL_V4V6} down
+ip link set ${TUNNEL_V6V6} down
+ip link set ${TUNNEL_V6V4} down
+
+ip tunnel del ${TUNNEL_V4V4}
+ip tunnel del ${TUNNEL_V6V6}
+ip tunnel del ${TUNNEL_V6V4}
+ip tunnel del ${TUNNEL_V4V6}
