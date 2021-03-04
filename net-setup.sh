@@ -130,6 +130,10 @@ fi
 if [ "$ACTION" != start ]; then
     ip link set $IFACE down
 
+    if [ -f "$CONF_FILE".stop ]; then
+	. "$CONF_FILE".stop $IFACE
+    fi
+
     echo "Removing $IFACE"
     ip tuntap del $IFACE mode tap
 fi
