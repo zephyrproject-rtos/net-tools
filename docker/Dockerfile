@@ -8,7 +8,9 @@ RUN apt update && apt install -y \
     dante-server \
     curl \
     netcat \
-    tcpdump
+    tcpdump \
+    dnsmasq \
+    avahi-daemon
 
 # We need the net-tools project as it contains helper apps needed
 # in testing.
@@ -62,11 +64,11 @@ COPY mosquitto.conf mosquitto-tls.conf /usr/local/etc/mosquitto/
 # network sample.
 # The syslog-receiver.py will test syslog-net sample
 COPY http-server.py https-server.py http-get-file-test.sh \
-     syslog-receiver.py /usr/local/bin/
+     syslog-receiver.py dnsmasq.sh avahi-daemon.sh /usr/local/bin/
 COPY http-get-file-test.sh /usr/local/bin/https-get-file-test.sh
 
 # Dante is SOCKS proxy. The gptp.conf is conf file for linuxptp.
-COPY danted.conf gptp.cfg /etc/
+COPY danted.conf gptp.cfg dnsmasq.conf avahi-daemon.conf /etc/
 
 WORKDIR /net-tools
 
