@@ -7,6 +7,9 @@ The comments and instructions below are for the new IP stack in Zephyr.
 Here are instructions how to communicate between Zephyr that is running
 inside QEMU, and host device that is running Linux.
 
+For setting up routing and NAT rules to allow access to external networks, please see
+the [README NAT.md](README%20NAT.md)
+
 You need to run *socat* and *tunslip* to create a minimally working
 network setup.
 

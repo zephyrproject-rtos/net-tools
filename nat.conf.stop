@@ -1,0 +1,4 @@
+INTERFACE="$1"
+
+kill $(cat /var/run/dnsmasq_zeth.pid)
+sysctl -w net.ipv4.ip_forward=0
