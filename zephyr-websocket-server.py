@@ -19,7 +19,7 @@ def client_left(client, server):
 # Called when a client sends a message
 def message_received(client, server, message):
 	print("Client(%d) sent[%d]" % (client['id'], len(message)))
-        server.send_message(client, message)
+	server.send_message(client, message)
 
 PORT=9001
 server = WebsocketServer(PORT, host="192.0.2.2", loglevel=logging.INFO)
