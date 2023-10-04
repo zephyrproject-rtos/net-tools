@@ -8,7 +8,8 @@ RUN apt update && apt install -y \
     dante-server \
     curl \
     netcat-traditional \
-    tcpdump
+    tcpdump \
+    default-jre-headless
 
 # We need the net-tools project as it contains helper apps needed
 # in testing.
@@ -67,6 +68,11 @@ COPY http-get-file-test.sh /usr/local/bin/https-get-file-test.sh
 
 # Dante is SOCKS proxy. The gptp.conf is conf file for linuxptp.
 COPY danted.conf gptp.cfg /etc/
+
+# Leshan demo server
+RUN cd /net-tools && \
+    wget 'https://ci.eclipse.org/leshan/job/leshan/lastSuccessfulBuild/artifact/leshan-server-demo.jar' && \
+    wget 'https://ci.eclipse.org/leshan/job/leshan/lastSuccessfulBuild/artifact/leshan-bsserver-demo.jar'
 
 WORKDIR /net-tools
 
