@@ -1,13 +1,13 @@
 # Create Docker image that can be used for testing Zephyr network
 # sample applications.
 
-FROM gcc
+FROM gcc:bookworm
 
 # Get all the extra app we need in the container
 RUN apt update && apt install -y \
     dante-server \
     curl \
-    netcat \
+    netcat-traditional \
     tcpdump
 
 # We need the net-tools project as it contains helper apps needed
