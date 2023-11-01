@@ -1,0 +1,4 @@
+DOCKER_USER_INTERFACE=$(awk -F'=' '/DOCKER_USER_INTERFACE=/{print $2}' docker.conf)
+
+echo -n Remove docker net:
+docker network rm $DOCKER_USER_INTERFACE

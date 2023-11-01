@@ -7,7 +7,7 @@
 
 * Setup network interfaces, IP addresses and routes
 
-	./net-setup.sh --config docker.conf
+	sudo ./net-setup.sh --config docker.conf start
 
 * Run Docker image
 
@@ -49,6 +49,6 @@
 	docker container exec net-tools /net-tools/echo-client 192.0.2.1
 	docker container exec net-tools /net-tools/echo-client -t 192.0.2.1
 
-* Remove the 'net-tools0' docker network:
+* Remove the network setup:
 
-	docker network rm net-tools0
+	sudo ./net-setup.sh --config docker.conf stop
