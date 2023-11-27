@@ -1,4 +1,6 @@
 INTERFACE="$1"
+IPV4_ROUTE_1=$(awk -F'=' '/IPV4_ROUTE_1=/{gsub(/"/, "", $2);print $2}' nat.conf)
 
 kill $(cat /var/run/dnsmasq_zeth.pid)
 sysctl -w net.ipv4.ip_forward=0
+iptables -t nat -D POSTROUTING -j MASQUERADE -s $IPV4_ROUTE_1
