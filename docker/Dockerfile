@@ -71,8 +71,8 @@ COPY danted.conf gptp.cfg /etc/
 
 # Leshan demo server
 RUN cd /net-tools && \
-    wget 'https://ci.eclipse.org/leshan/job/leshan/lastSuccessfulBuild/artifact/leshan-server-demo.jar' && \
-    wget 'https://ci.eclipse.org/leshan/job/leshan/lastSuccessfulBuild/artifact/leshan-bsserver-demo.jar'
+    curl 'https://repo1.maven.org/maven2/org/eclipse/leshan/leshan-server-demo/2.0.0-M14/leshan-server-demo-2.0.0-M14-jar-with-dependencies.jar' -o leshan-server-demo.jar && \
+    curl 'https://repo1.maven.org/maven2/org/eclipse/leshan/leshan-bsserver-demo/2.0.0-M14/leshan-bsserver-demo-2.0.0-M14-jar-with-dependencies.jar' -o leshan-bsserver-demo.jar
 
 WORKDIR /net-tools
 
