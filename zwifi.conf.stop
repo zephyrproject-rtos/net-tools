@@ -1,0 +1,21 @@
+# Configuration file for setting IP addresses for a wifi network interface.
+
+INTERFACE="$1"
+
+# Rename wlan0 to something we want
+ip link set dev "$INTERFACE" down
+
+rmmod mac80211_hwsim
+
+PID_FILE_HOSTAPD=/var/run/zephyr-hostapd.pid
+PID_FILE_WPA_SUPPLICANT=/var/run/zephyr-wpa_supplicant.pid
+
+# Kill hostapd
+#kill $(cat "$PID_FILE_WPA_SUPPLICANT")
+kill $(cat "$PID_FILE_HOSTAPD")
+
+AP_NS=zwifi-ap
+ip netns delete $AP_NS
+
+# The net-tools script expects this so create it
+ip tuntap add "$INTERFACE" mode tap
