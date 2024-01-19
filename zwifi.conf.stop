@@ -1,0 +1,18 @@
+# Tear down the network created by zwifi.conf.
+
+INTERFACE="$1"
+AP_NS=zwifi-ap
+
+PID_FILE_HOSTAPD=/var/run/zephyr-hostapd.pid
+
+ip link set dev "$INTERFACE" down
+
+# Stop hostapd before removing the radios it runs on.
+kill $(cat "$PID_FILE_HOSTAPD")
+
+rmmod mac80211_hwsim
+
+ip netns delete $AP_NS
+
+# The net-tools script expects this so create it
+ip tuntap add "$INTERFACE" mode tap
