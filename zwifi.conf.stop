@@ -2,13 +2,19 @@
 
 INTERFACE="$1"
 AP_NS=zwifi-ap
-
-PID_FILE_HOSTAPD=/var/run/zephyr-hostapd.pid
+AP_MODES="open wpa2"
 
 ip link set dev "$INTERFACE" down
 
-# Stop hostapd before removing the radios it runs on.
-kill $(cat "$PID_FILE_HOSTAPD")
+# Stop the daemons before removing the radios they run on.
+for i in $AP_MODES
+do
+    PID_FILE_HOSTAPD="/var/run/zephyr-hostapd-${i}.pid"
+    PID_FILE_DNSMASQ="/var/run/zephyr-dnsmasq-${i}.pid"
+
+    kill $(cat "$PID_FILE_HOSTAPD")
+    kill $(cat "$PID_FILE_DNSMASQ")
+done
 
 rmmod mac80211_hwsim
 
