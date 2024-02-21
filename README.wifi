@@ -4,13 +4,14 @@ Install these tools
 * iw
 * wpa_supplicant
 * hostapd
+* dnsmasq
 
 32-bit versions of these packages
 * pkg-config libnl-3-dev libnl-genl-3-dev
 
 In Ubuntu
 
-   sudo apt install iw hostapd pkg-config:i386 libnl-3-dev:i386 libnl-genl-3-dev:i386
+   sudo apt install iw hostapd dnsmasq pkg-config:i386 libnl-3-dev:i386 libnl-genl-3-dev:i386
    sudo systemctl disable hostapd
 
 Create wifi interface, this needs root privileges
