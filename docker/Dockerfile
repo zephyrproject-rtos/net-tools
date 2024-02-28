@@ -9,7 +9,10 @@ RUN apt update && apt install -y \
     curl \
     netcat-traditional \
     tcpdump \
-    default-jre-headless
+    default-jre-headless \
+    dnsmasq \
+    iproute2 \
+    iputils-ping
 
 # We need the net-tools project as it contains helper apps needed
 # in testing.
@@ -73,6 +76,9 @@ COPY danted.conf gptp.cfg /etc/
 RUN cd /net-tools && \
     curl 'https://repo1.maven.org/maven2/org/eclipse/leshan/leshan-server-demo/2.0.0-M14/leshan-server-demo-2.0.0-M14-jar-with-dependencies.jar' -o leshan-server-demo.jar && \
     curl 'https://repo1.maven.org/maven2/org/eclipse/leshan/leshan-bsserver-demo/2.0.0-M14/leshan-bsserver-demo-2.0.0-M14-jar-with-dependencies.jar' -o leshan-bsserver-demo.jar
+
+# DNS resolver to test online connectivity checker
+COPY dnsmasq.conf /etc/
 
 WORKDIR /net-tools
 
