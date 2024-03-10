@@ -39,6 +39,12 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._set_headers()
         self.wfile.write(payload)
 
+    def do_GET(self):
+        payload = "<html><p>Done</p></html>"
+        self.length = len(payload)
+        self._set_headers()
+        self.wfile.write(payload.encode())
+
 def main(address):
     if ':' in address:
         httpd = HTTPServerV6((address, PORT), RequestHandler)
