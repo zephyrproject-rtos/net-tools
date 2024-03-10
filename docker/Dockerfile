@@ -66,7 +66,7 @@ COPY mosquitto.conf mosquitto-tls.conf /usr/local/etc/mosquitto/
 # network sample.
 # The syslog-receiver.py will test syslog-net sample
 COPY http-server.py https-server.py http-get-file-test.sh \
-     syslog-receiver.py /usr/local/bin/
+     syslog-receiver.py connectivity-check.sh /usr/local/bin/
 COPY http-get-file-test.sh /usr/local/bin/https-get-file-test.sh
 
 # Dante is SOCKS proxy. The gptp.conf is conf file for linuxptp.
