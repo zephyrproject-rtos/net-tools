@@ -7,4 +7,5 @@
 # inside Docker container.
 
 dnsmasq -C /etc/dnsmasq.conf &
-/usr/local/bin/http-server.py
+/usr/local/bin/http-server.py &
+/usr/local/bin/https-server.py
