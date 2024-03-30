@@ -20,12 +20,16 @@ import sys
 import os.path
 from datetime import datetime
 from scapy.all import *
+from scapy.layers.can import CAN
 
 interface = None
 verbose = True
 port = 4242
 pcap = None
 type = "Ether"
+cooked = False
+cooked_sllv1 = False
+cooked_sllv2 = False
 
 argv = sys.argv[1:]
 
@@ -42,12 +46,17 @@ def usage():
           "\n\t[-t | --type <L2 type of the data>]" +
           f"\n\t\tScapy L2 type name of the UDP payload, default is {type}" +
           "\n\t[-w | --write <pcap file name>]" +
-          "\n\t\tWrite the received data to file in PCAP format")
+          "\n\t\tWrite the received data to file in PCAP format" +
+          "\n\t[-c | --cooked-sllv1]" +
+          "\n\t\tThe payload is Linux cooked mode v1 data" +
+          "\n\t[-C | --cooked-sllv2]" +
+          "\n\t\tThe payload is Linux cooked mode v2 data")
 
 try:
     opts, args = getopt.getopt(argv,
-                               'hi:p:qt:w:',
-                               ['help', 'interface=', 'port=',
+                               'cChi:p:qt:w:',
+                               ['cooked-sllv1', 'cooked-sllv2', 'help',
+                                'interface=', 'port=',
                                 'quiet', 'type=', 'write='])
 except getopt.GetoptError as err:
     print(err)
@@ -68,6 +77,12 @@ for o, a in opts:
         type = a
     elif o in ("-w", "--write"):
         pcap = a
+    elif o in ("-c", "--cooked-sllv1"):
+        cooked_sllv1 = True
+        cooked = True
+    elif o in ("-C", "--cooked-sllv2"):
+        cooked_sllv2 = True
+        cooked = True
     else:
         assert False, "unhandled option " + o
 
@@ -86,6 +101,14 @@ sock.bind(('', port))
 
 def process_packet(data):
     packet = eval(type)(data)
+
+    if cooked:
+        if cooked_sllv1:
+            packet = CookedLinux(_pkt = Packet.build(packet))
+        else:
+            packet = CookedLinuxV2(_pkt = Packet.build(packet))
+
+        packet.show()
 
     if verbose:
         now = datetime.utcnow()
