@@ -19,7 +19,7 @@
 
 tunslip_prog=""
 
-for tunslip in ./tunslip6 "${0%/*}/tunslip6"  $ZEPHYR_BASE/../net-tools/tunslip6
+for tunslip in ./tunslip6 "${0%/*}/tunslip6"  $ZEPHYR_BASE/../tools/net-tools/tunslip6
 do
     if [ -x "$tunslip" ]
     then
