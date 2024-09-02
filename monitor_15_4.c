@@ -415,12 +415,12 @@ static int setup_fifofd2(void)
 int main(int argc, char *argv[])
 {
 	int fifo1 = -1, fifo2 = -1, ret;
-	char *pipe1 = "/tmp/ip-15-4-1";
-	char *pipe2 = "/tmp/ip-15-4-2";
+	char *pipe1 = "/tmp/ip-stack-client";
+	char *pipe2 = "/tmp/ip-stack-server";
 
 	if (argc < 2) {
 		printf("Usage: %s <pcapfile> [<pipe_1> <pipe_2>]\n", argv[0]);
-		printf("   e.g.: monitor_15_4 sample.pcap [/tmp/ip-15-4-1 /tmp/ip-15-4-2]\n");
+		printf("   e.g.: monitor_15_4 sample.pcap [/tmp/ip-stack-client /tmp/ip-stack-server]\n");
 		exit(-EINVAL);
 	}
 
