@@ -154,7 +154,7 @@ bool monitor_pcap_create(const char *pathname)
 	}
 
 	if (len != PCAP_FILE_HDR_SIZE) {
-		DBG("Written PCAP header size mimatch\n");
+		DBG("Written PCAP header size mismatch\n");
 		goto failed;
 	}
 
