@@ -4,6 +4,9 @@
 
 The comments and instructions below are for the new IP stack in Zephyr.
 
+In a Zephyr default setup, the network tools are pre-installed under the
+`tools` directory.
+
 Here are instructions how to communicate between Zephyr that is running
 inside QEMU, and host device that is running Linux.
 

@@ -4,8 +4,8 @@ Requires=loop-socat.service
 After=loop-socat.service
 
 [Service]
-Environment=ZEPHYR_BASE=/home/zephyr/z
-ExecStart=/home/zephyr/net-tools/loop-slip-tap.sh -v5
+Environment=ZEPHYR_BASE=/home/zephyrproject/
+ExecStart=/home/zephyrproject/tools/net-tools/loop-slip-tap.sh -v5
 
 [Install]
 Wants=loop-socat.service

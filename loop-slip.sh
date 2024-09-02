@@ -18,11 +18,11 @@
 # to manually restart tunslip process that creates the tun0 device.
 
 if [ ! -f ./tunslip6 ]; then
-    if [ ! -f $ZEPHYR_BASE/../net-tools/tunslip6 ]; then
+    if [ ! -f $ZEPHYR_BASE/../tools/net-tools/tunslip6 ]; then
 	echo "Cannot find tunslip6 executable."
 	exit 1
     fi
-    DIR=$ZEPHYR_BASE/../net-tools
+    DIR=$ZEPHYR_BASE/../tools/net-tools
 else
     DIR=.
 fi

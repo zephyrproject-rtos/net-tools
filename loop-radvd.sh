@@ -34,11 +34,11 @@ else
 fi
 
 if [ ! -f $CONF_FILE ]; then
-    if [ ! -f $ZEPHYR_BASE/../net-tools/$CONF_FILE ]; then
+    if [ ! -f $ZEPHYR_BASE/../tools/net-tools/$CONF_FILE ]; then
 	echo "Cannot find $CONF_FILE file."
 	exit 1
     fi
-    DIR=$ZEPHYR_BASE/../net-tools
+    DIR=$ZEPHYR_BASE/../tools/net-tools
 else
     DIR=.
 fi
