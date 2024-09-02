@@ -418,17 +418,16 @@ int main(int argc, char *argv[])
 	char *pipe1 = "/tmp/ip-stack-client";
 	char *pipe2 = "/tmp/ip-stack-server";
 
-	if (argc < 2) {
+	if (argc < 2 || argc > 4) {
 		printf("Usage: %s <pcapfile> [<pipe_1> <pipe_2>]\n", argv[0]);
 		printf("   e.g.: monitor_15_4 sample.pcap [/tmp/ip-stack-client /tmp/ip-stack-server]\n");
 		exit(-EINVAL);
 	}
 
-	if (argc == 3)
+	if (argc >= 3)
 		pipe1 = argv[2];
 
 	if (argc == 4) {
-		pipe1 = argv[2];
 		pipe2 = argv[3];
 	}
 
