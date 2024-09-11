@@ -1,0 +1,13 @@
+# Configuration file for setting IP addresses for multiple network interface.
+
+COUNT=${COUNTER:-2}
+INTERFACE_PREFIX="$1"
+
+INTERFACE_TMPL=`echo ${INTERFACE_PREFIX} | sed "s/0//g"`
+
+for ((i = 1; i < $COUNT; i++ )); {
+	iface_idx=$i
+	INTERFACE=${INTERFACE_TMPL}${iface_idx}
+
+	ip tuntap del $INTERFACE mode tap
+}

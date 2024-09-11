@@ -63,6 +63,11 @@ fi
 
 IFACE=zeth
 
+# The counter variable is passed to configuration script where
+# it can be used for example to create multiple network interfaces etc.
+# The -t option can be used to set the variable.
+COUNTER=1
+
 # Default config file setups default connectivity IP addresses
 CONF_FILE=./zeth.conf
 
@@ -75,6 +80,10 @@ do
 	    ;;
 	--iface|-i)
 	    IFACE="$2"
+	    shift 2
+	    ;;
+	--times|-t)
+	    COUNTER="$2"
 	    shift 2
 	    ;;
 	--help|-h)
