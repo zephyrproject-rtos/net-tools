@@ -1,4 +1,16 @@
 DOCKER_USER_INTERFACE=$(awk -F'=' '/DOCKER_USER_INTERFACE=/{print $2}' docker.conf)
 
+# Don't execute anything, if network does not exist anymore
+if ! docker network inspect $DOCKER_USER_INTERFACE 2>&1 >/dev/null; then
+	return 1
+fi
+
+echo Stop containers using docker net
+FMT="{{range .Containers}}{{println .Name}}{{end}}"
+for cont in $(docker network inspect $DOCKER_USER_INTERFACE --format "$FMT")
+do
+	docker kill $cont
+done
+
 echo -n Remove docker net:
 docker network rm $DOCKER_USER_INTERFACE
