@@ -1,8 +1,8 @@
 #!/usr/bin/python
 
 import socket
-from BaseHTTPServer import HTTPServer
-from SimpleHTTPServer import SimpleHTTPRequestHandler
+from http.server import HTTPServer
+from http.server import SimpleHTTPRequestHandler
 
 PORT = 8000
 
@@ -26,7 +26,7 @@ class RequestHandler(SimpleHTTPRequestHandler):
 
 def main():
     httpd = HTTPServerV6(("", PORT), RequestHandler)
-    print "Serving at port", PORT
+    print("Serving at port", PORT)
     httpd.serve_forever()
 
 if __name__ == '__main__':
