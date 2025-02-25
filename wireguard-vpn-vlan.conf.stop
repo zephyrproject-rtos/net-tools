@@ -1,0 +1,9 @@
+# Configuration file for removing a network interface.
+
+INTERFACE="$1"
+VPN_IFACE_PREFIX="zwg"
+
+ip link del dev ${VPN_IFACE_PREFIX}0
+ip link del dev ${VPN_IFACE_PREFIX}1
+
+ip link delete $INTERFACE
