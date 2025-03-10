@@ -382,6 +382,20 @@ static void signal_handler(int sig)
 	do_exit = true;
 }
 
+static int set_sock_priority(int sock)
+{
+	int priority = random() % 8;
+	int ret = 0;
+
+	ret = setsockopt(sock, SOL_SOCKET, SO_PRIORITY, &priority,
+			 sizeof(priority));
+	if (ret < 0) {
+		perror("Cannot set socket priority");
+	}
+
+	return ret;
+}
+
 extern int optind, opterr, optopt;
 extern char *optarg;
 
@@ -393,7 +407,7 @@ extern char *optarg;
 int main(int argc, char**argv)
 {
 	int c, ret, fd, i = 0, timeout = -1, port = SERVER_PORT;
-	bool flood = false, multicast = false;
+	bool flood = false, multicast = false, classify = false;
 	struct sockaddr_in6 addr6_send = { 0 }, addr6_recv = { 0 };
 	struct sockaddr_in addr4_send = { 0 }, addr4_recv = { 0 };
 	struct sockaddr *addr_send, *addr_recv;
@@ -413,10 +427,15 @@ int main(int argc, char**argv)
 
 	opterr = 0;
 
-	while ((c = getopt(argc, argv, "Fi:p:ethr")) != -1) {
+	while ((c = getopt(argc, argv, "Fci:p:ethr")) != -1) {
 		switch (c) {
 		case 'F':
 			flood = true;
+			break;
+		case 'c':
+			classify = true;
+			gettimeofday(&start_time, NULL);
+			srandom(start_time.tv_usec);
 			break;
 		case 'i':
 			interface = optarg;
@@ -453,6 +472,9 @@ int main(int argc, char**argv)
 		printf("-t Use TCP, default is to use UDP only\n");
 		printf("-p Use this port, default port is %d\n", SERVER_PORT);
 		printf("-r Send random packet lengths\n");
+		printf("-c Classify (use 802.1Q defined priorities) the sent "
+		       "packets. The packet priority is used for UDP. "
+		       "This also requires VLAN to be used.\n");
 		printf("-F (flood) option will prevent the client from "
 		       "waiting the data.\n"
 		       "   The -F option will stress test the server.\n");
@@ -563,6 +585,8 @@ int main(int argc, char**argv)
 			perror("connect");
 			exit(-errno);
 		}
+
+		classify = false;
 	}
 
 again:
@@ -613,9 +637,17 @@ again:
 					sent += len;
 					pos += ret;
 				} while (sent < len);
-			} else
+			} else {
+				if (classify) {
+					ret = set_sock_priority(fd);
+					if (ret < 0)
+						goto out;
+				}
+
 				ret = sendto(fd, buf_ptr, len, 0, addr_send,
 					     addr_len);
+			}
+
 			if (ret < 0) {
 				perror("send");
 				goto out;
