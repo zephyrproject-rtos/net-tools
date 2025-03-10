@@ -26,7 +26,7 @@ if [ $? -eq 0 ]; then
 else
     ip link | grep zeth > /dev/null 2>&1
     if [ $? -eq 0 ]; then
-	CONF_FILE=radvd_native_posix.conf
+	CONF_FILE=radvd_native_sim.conf
     else
 	echo "Cannot find suitable network interface to run radvd"
 	exit 3
