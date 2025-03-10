@@ -31,11 +31,11 @@
 	       --ip=192.0.2.2 --ip6=2001:db8::2 \
 	       --rm -dt --network=net-tools0 net-tools sh
 
-* Run Qemu / native-posix image
+* Run Qemu / native_sim image
 
 	rm -rf build && mkdir build
 
-	cmake -GNinja -DBOARD=native_posix -B build
+	cmake -GNinja -DBOARD=native_sim -B build
 	   or
 	cmake -GNinja -DBOARD=qemu_x86 -DOVERLAY_CONFIG=overlay-e1000.conf \
 	   -B build
