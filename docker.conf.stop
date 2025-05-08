@@ -1,7 +1,7 @@
 DOCKER_USER_INTERFACE=$(awk -F'=' '/DOCKER_USER_INTERFACE=/{print $2}' docker.conf)
 
 # Don't execute anything, if network does not exist anymore
-if ! docker network inspect $DOCKER_USER_INTERFACE 2>&1 >/dev/null; then
+if ! docker network inspect $DOCKER_USER_INTERFACE >/dev/null 2>&1; then
 	return 1
 fi
 
