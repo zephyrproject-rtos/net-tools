@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -eu
 #
 # Copyright (c) 2018 Intel Corporation
 #
@@ -70,6 +70,7 @@ COUNTER=1
 
 # Default config file setups default connectivity IP addresses
 CONF_FILE=./zeth.conf
+ACTION=""
 
 while [ $# -gt 0 ]
 do
@@ -118,6 +119,7 @@ STOPPED=0
 trap ctrl_c INT TERM
 
 ctrl_c() {
+    set +eu
     STOPPED=1
 }
 
