@@ -15,8 +15,8 @@
 #
 
 import socket
-from BaseHTTPServer import HTTPServer
-from SimpleHTTPServer import SimpleHTTPRequestHandler
+from http.server import HTTPServer
+from http.server import SimpleHTTPRequestHandler
 import ssl
 
 PORT = 4443
@@ -41,10 +41,10 @@ class RequestHandler(SimpleHTTPRequestHandler):
 
 def main():
     httpd = HTTPServerV6(("", PORT), RequestHandler)
-    print "Serving at port", PORT
-    httpd.socket = ssl.wrap_socket(httpd.socket,
-                                   certfile='./https-server.pem',
-                                   server_side=True)
+    print("Serving at port", PORT)
+    context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    context.load_cert_chain(certfile='./https-server.pem')
+    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
     httpd.serve_forever()
 
 if __name__ == '__main__':
