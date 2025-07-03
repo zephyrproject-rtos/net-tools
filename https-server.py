@@ -34,7 +34,7 @@ class RequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
-        payload = "<html><p>Done</p></html>"
+        payload = b"<html><p>Done</p></html>"
         self.length = len(payload)
         self._set_headers()
         self.wfile.write(payload)
