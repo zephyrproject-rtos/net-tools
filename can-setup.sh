@@ -18,7 +18,7 @@ usage() {
     cat <<EOF
 $0 [--config|-c <file>] [--iface|-i <interface>] [start|up] [stop|down]
 
-If no parameters are given, then "zcan0" network interface and "zcan0.conf"
+If no parameters are given, then "zcan0" network interface and "vcan.conf"
 configuration file are used. The script waits until user presses CTRL-c
 and then removes the canbus network interface.
 
@@ -63,7 +63,7 @@ fi
 IFACE=zcan0
 
 # Default config file setups default connectivity
-CONF_FILE=./zcan0.conf
+CONF_FILE=./vcan.conf
 
 while [ $# -gt 0 ]
 do
