@@ -7,11 +7,11 @@ The comments and instructions below are for the new IP stack in Zephyr.
 In a Zephyr default setup, the network tools are pre-installed under the
 `tools` directory.
 
-Here are instructions how to communicate between Zephyr that is running
-inside QEMU, and host device that is running Linux.
+Here are instructions for how to communicate between Zephyr running
+inside QEMU, and a host device that is running Linux.
 
 For setting up routing and NAT rules to allow access to external networks, please see
-the [README NAT.md](README%20NAT.md)
+[README NAT.md](README%20NAT.md)
 
 You need to run *socat* and *tunslip* to create a minimally working
 network setup.
@@ -31,10 +31,10 @@ $ sudo ./loop-slip-tap.sh
 ```
 
 After running these scripts you do not need to manually restart
-them when qemu process stops.
+them when the qemu process stops.
 
-In the Qemu side, you need to compile the kernel with proper config.
-Minimally you need these settings active in your project config file.
+On the QEMU side, you need to compile the kernel with the proper config.
+You need at least these configs enabled in your project config file:
 ```
 CONFIG_NETWORKING=y
 CONFIG_NET_IPV6=y
@@ -50,11 +50,10 @@ CONFIG_NANO_TIMEOUTS=y
 CONFIG_TEST_RANDOM_GENERATOR=y
 ```
 
-After you have the loop scripts and Qemu running running you can communicate
-with the Zephyr.
+After running the loop scripts and QEMU, you can communicate with Zephyr.
 
-If your have echo-server running in the Qemu, then you can use the echo-client
-tool in net-tools directory to communicate with it.
+If you have echo-server running in QEMU, you can use the echo-client
+tool in the net-tools directory to communicate with it.
 ```
 # ./echo-client -i tap0 2001:db8::1
 ```
@@ -62,7 +61,7 @@ The IP stack responds to ping requests if properly configured.
 ```
 $ ping6 -I tap0 -c 1 2001:db8::1
 ```
-You can attach wireshark to tap0 interface to see what data is being
+You can attach wireshark to the tap0 interface to see the data being
 transferred.
 
 If building with CONFIG_NET_TCP=y in your project config file, it's possible
@@ -80,15 +79,15 @@ Be sure to use Python 3, as it requires a function from the socket module
 that's only available in this version (wrapper around if_nametoindex(3)).
 
 
-## Using net-setup.sh script to setup host side ethernet interface
+## Using net-setup.sh to setup host side ethernet interface
 
-The net-setup.sh script can setup an ethernet interface to the host.
-User is able to setup a configuration file that will contain
+The net-setup.sh script can setup an ethernet interface on the host.
+The user is able to setup a configuration file that will contain
 commands to setup IP addresses and routes to the host interface.
 This net-setup.sh script will need to be run as a root user.
 
 If no parameters are given, then "zeth" network interface and "zeth.conf"
-configuration file are used. The script waits until user presses CTRL-c
+configuration file are used. The script waits until the user presses CTRL-c
 and then removes the network interface.
 ```
 $ net-setup.sh
@@ -101,8 +100,8 @@ $ net-setup.sh --config my-own-config.conf --iface foobar
 ```
 
 It is also possible to let the script return and then stop the network
-interface later. Is can be done by first creating the interface with
-"start" or "up" command, and then later remove the interface with
+interface later. This can be done by first creating the interface with the
+"start" or "up" command, and then later remove the interface with the
 "stop" or "down" command.
 ```
 $ net-setup.sh start
@@ -116,7 +115,7 @@ $ net-setup.sh --config my-own-config.conf down
 ```
 
 Any extra parameters that the script does not know, are passed directly
-to "ip" command.
+to the "ip" command.
 ```
 $ net-setup.sh --config my-own-config.conf --iface foo user bar
 ```
@@ -137,12 +136,12 @@ Finally run the stunnel script in Linux
 ```
 $ ./stunnel.sh
 ```
-And connect echo-client to this SSL tunnel (note that the IP address
-is the address of Linux host where the tunnel end point is located).
+Then connect echo-client to this SSL tunnel (note that the IP address
+is the address of the Linux host where the tunnel end point is located).
 ```
 $ ./echo-client -p 4243 2001:db8::2 -t
 ```
-If you are running echo-client in Zephyr QEMU, then run echo-server like
+If you are running echo-client in Zephyr QEMU, run echo-server like
 this:
 ```
 $ ./echo-server -p 4244 -i tap0
@@ -230,7 +229,7 @@ $ ./dtls-server
 
 ## TLS connecitivity errors
 
-If you see this error print in zephyr console
+If you see this error in the zephyr console
 
 [net/app] [ERR] _net_app_ssl_mainloop: Closing connection -0x7180 (SSL - Verification of the message MAC failed)
 
@@ -244,8 +243,8 @@ CONFIG_MBEDTLS_HEAP_SIZE=30000
 
 ## PPP Connectivity
 
-You can test the PPP connectivity running in Qemu in Zephyr using pppd that is
-running in Linux host. You need to run *socat* and *pppd* to create
+You can test the PPP connectivity running Zephyr in QEMU using a pppd that is
+running on the Linux host. You need to run *socat* and *pppd* to create
 a minimally working network setup.
 
 There are convenience scripts (_loop-ppp-dev.sh_ and _loop-pppd.sh_) for
@@ -262,6 +261,6 @@ Terminal 2:
 $ sudo ./loop-pppd.sh
 ```
 
-After this, start PPP enabled Zephyr application. For example Zephyr
-*echo-server* sample in samples/net/sockets/echo_server has _overlay-ppp.conf_
+After this, start a PPP enabled Zephyr application. For example, the Zephyr
+*echo-server* sample in samples/net/sockets/echo_server has an _overlay-ppp.conf_
 file that enables PPP support.
