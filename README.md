@@ -5,7 +5,7 @@
 The comments and instructions below are for the new IP stack in Zephyr.
 
 In a Zephyr default setup, the network tools are pre-installed under the
-`tools` directory.
+tools directory.
 
 Here are instructions for how to communicate between Zephyr running
 inside QEMU, and a host device that is running Linux.
@@ -13,7 +13,7 @@ inside QEMU, and a host device that is running Linux.
 For setting up routing and NAT rules to allow access to external networks, please see
 [README NAT.md](README%20NAT.md)
 
-You need to run *socat* and *tunslip* to create a minimally working
+You need to run `socat` and `tunslip` to create a minimally working
 network setup.
 
 There are convenience scripts (_loop-socat.sh_ and _loop-slip-tap.sh_) for
@@ -101,8 +101,8 @@ $ net-setup.sh --config my-own-config.conf --iface foobar
 
 It is also possible to let the script return and then stop the network
 interface later. This can be done by first creating the interface with the
-"start" or "up" command, and then later remove the interface with the
-"stop" or "down" command.
+`start` or `up` command, and then later remove the interface with the
+`stop` or `down` command.
 ```
 $ net-setup.sh start
 do your things here
@@ -115,15 +115,14 @@ $ net-setup.sh --config my-own-config.conf down
 ```
 
 Any extra parameters that the script does not know, are passed directly
-to the "ip" command.
+to the `ip` command.
 ```
 $ net-setup.sh --config my-own-config.conf --iface foo user bar
 ```
 
 ## Using encrypted SSL link with echo-* programs
 
-Install stunnel
-
+Install `stunnel`.
 Fedora:
 ```
 $ dnf install stunnel
@@ -244,7 +243,7 @@ CONFIG_MBEDTLS_HEAP_SIZE=30000
 ## PPP Connectivity
 
 You can test the PPP connectivity running Zephyr in QEMU using a pppd that is
-running on the Linux host. You need to run *socat* and *pppd* to create
+running on the Linux host. You need to run `socat` and `pppd` to create
 a minimally working network setup.
 
 There are convenience scripts (_loop-ppp-dev.sh_ and _loop-pppd.sh_) for
