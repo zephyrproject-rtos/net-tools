@@ -1,0 +1,8 @@
+# Cleanup for zeth-dhcpv6-pd.conf. net-setup.sh removes the primary interface
+# (zeth0) itself, so here we only need to remove the downstream interface
+# (zeth1) that the config file created.
+
+INTERFACE0="$1"
+INTERFACE1=$(echo "${INTERFACE0}" | sed "s/0\$/1/")
+
+ip tuntap del "${INTERFACE1}" mode tap 2>/dev/null
