@@ -17,17 +17,11 @@
  * The system under test is samples/net/mdns_responder.
  *
  * Because the tester queries from an ephemeral port, every exchange here is a
- * legacy unicast query, and RFC 6762 6.7 asks for four things in the answer to
- * one of those: the query identifier echoed back, the question repeated, the
- * cache flush bit clear, and the TTL capped at ten seconds. The responder does
- * none of them, because it does not tell a legacy query apart from any other:
- * it answers with identifier zero, no question section, the cache flush bit
- * set and the full ten minute TTL. That is correct for the multicast answers
- * that a real mDNS resolver receives, since such a resolver queries from port
- * 5353. The tests below therefore check what the responder actually does, and
- * the two checks that encode a divergence are marked where they are made. If
- * the responder ever learns about legacy queries, those checks will fail and
- * should be changed deliberately rather than relaxed.
+ * legacy unicast query in the sense of RFC 6762 6.7: it comes from something
+ * making a one-off lookup rather than from another responder. The answer to
+ * one has to be something such a querier understands, which is what most of
+ * the checks below are about: the identifier it used echoed back, the question
+ * repeated, no cache flush bit, and a short time to live.
  */
 module MDNS_Suite {
 
@@ -38,15 +32,17 @@ import from TCCConversion_Functions all;
 import from Zephyr_SUT all;
 import from Zephyr_Transport all;
 
-/* The responder answers with this TTL, RFC 6762 10 recommends it for records
- * that contain a host name.
+/* An answer to a legacy unicast query may be cached by something that knows
+ * nothing about multicast DNS, so RFC 6762 6.7 keeps its life short.
  */
-const octetstring c_mdns_ttl := int2oct(600, 4);
+const octetstring c_mdns_legacy_ttl := int2oct(10, 4);
 
-/* Bit 15 of the class field of an answer asks the receiver to flush any
- * cached record with the same name and type, RFC 6762 10.2.
+/* Bit 15 of the class field asks a multicast DNS cache to flush what it held
+ * for the name. RFC 6762 10.2 keeps it clear in an answer to a legacy unicast
+ * query, whose recipient is not such a cache and would read the bit as part of
+ * the class.
  */
-const RRClass c_class_in_flush := 32769;
+const RRClass c_class_in := 1;
 
 const charstring c_mdns_group_v4 := "224.0.0.251";
 const charstring c_mdns_group_v6 := "ff02::fb";
@@ -64,9 +60,9 @@ function f_mdns_group_v6() return charstring
 type component MDNS_MTC extends Zephyr_Tester {}
 
 /* A query for one name and one type, as a resolver on the link would send it. */
-template PDU_DNS ts_query(charstring p_name, RRType p_type) := {
+template PDU_DNS ts_query(charstring p_name, RRType p_type, integer p_id := 0) := {
 	header := {
-		id := 0,
+		id := p_id,
 		qr := DNS_QUERY,
 		opCode := DNS_OP_QUERY,
 		aa := false,
@@ -95,11 +91,12 @@ function f_open(in charstring p_local_addr) runs on MDNS_MTC
 	f_udp_listen(p_local_addr);
 }
 
-function f_send_query(in charstring p_group, in charstring p_name, in RRType p_type)
+function f_send_query(in charstring p_group, in charstring p_name, in RRType p_type,
+		     in integer p_id := 0)
 runs on MDNS_MTC
 {
 	f_send_to(p_group, c_mdns_port,
-		  enc_PDU_DNS(valueof(ts_query(p_name, p_type)), false, true));
+		  enc_PDU_DNS(valueof(ts_query(p_name, p_type, p_id)), false, true));
 }
 
 /* Wait for one answer and hand back the decoded message. Fails the test case
@@ -117,12 +114,9 @@ function f_await_response() runs on MDNS_MTC return PDU_DNS
 	return dec_PDU_DNS(v_recv.msg);
 }
 
-/* Every answer carries the queried name, the queried type, the cache flush
- * bit and the host name TTL. Check that once, here, rather than in each test.
- *
- * The class and TTL checks encode the legacy unicast divergence described at
- * the top of this module: RFC 6762 6.7 wants the cache flush bit clear and the
- * TTL capped at ten seconds in an answer to a query from an ephemeral port.
+/* Every answer carries the queried name and type, the class without the cache
+ * flush bit, and the short time to live that RFC 6762 6.7 asks for. Check that
+ * once, here, rather than in each test.
  */
 function f_check_answer_shape(in ResourceRecord p_rr, in charstring p_name, in RRType p_type)
 runs on MDNS_MTC
@@ -133,12 +127,16 @@ runs on MDNS_MTC
 	if (p_rr.rrType != p_type) {
 		setverdict(fail, "answer has type ", p_rr.rrType, " rather than ", p_type);
 	}
-	if (p_rr.rrClass != c_class_in_flush) {
+	if (p_rr.rrClass != c_class_in) {
 		setverdict(fail, "answer class is ", p_rr.rrClass,
-			   " rather than IN with the cache flush bit set");
+			   " rather than IN; the cache flush bit does not belong "&
+			   "in an answer to a query from an ephemeral port");
 	}
-	if (p_rr.ttl != c_mdns_ttl) {
-		setverdict(fail, "answer TTL is ", p_rr.ttl, " rather than ", c_mdns_ttl);
+	if (p_rr.ttl != c_mdns_legacy_ttl) {
+		setverdict(fail, "answer TTL is ", p_rr.ttl, " rather than ",
+			   c_mdns_legacy_ttl, "; an answer that may be cached by "&
+			   "something that knows nothing of multicast DNS is "&
+			   "given a short life");
 	}
 }
 
@@ -336,6 +334,53 @@ testcase tc_multiple_answers_share_the_name() runs on MDNS_MTC
 	f_close();
 }
 
+/* A querier that asked from an ephemeral port is not a multicast DNS
+ * implementation and has no way to match an answer to its question except by
+ * the identifier it chose and the question coming back. RFC 6762 6.7.
+ */
+testcase tc_legacy_query_is_answered_conventionally() runs on MDNS_MTC
+{
+	const integer c_id := 4660;
+	var PDU_DNS v_rsp;
+
+	f_open(tsp_tester_ipv4);
+	f_send_query(c_mdns_group_v4, f_local_name(), DNS_A, c_id);
+	v_rsp := f_await_response();
+
+	if (v_rsp.header.id != c_id) {
+		setverdict(fail, "the answer carries identifier ", v_rsp.header.id,
+			   " rather than the ", c_id, " that was asked with, so "&
+			   "the querier cannot tell what it answers");
+	}
+
+	if (v_rsp.header.qdCount != 1 or lengthof(v_rsp.queries) != 1) {
+		setverdict(fail, "the answer does not repeat the question, so the "&
+			   "querier cannot tell what was asked");
+		f_close();
+		stop;
+	}
+
+	if (v_rsp.queries[0].qName != f_local_name()) {
+		setverdict(fail, "the repeated question asks about ",
+			   v_rsp.queries[0].qName, " rather than ", f_local_name());
+	}
+	if (v_rsp.queries[0].qType != DNS_A) {
+		setverdict(fail, "the repeated question has type ",
+			   v_rsp.queries[0].qType, " rather than A");
+	}
+	if (v_rsp.queries[0].qClass != c_class_in) {
+		setverdict(fail, "the repeated question has class ",
+			   v_rsp.queries[0].qClass, " rather than IN");
+	}
+
+	if (not f_has_a_record(v_rsp.answers, f_local_name(), tsp_sut_ipv4)) {
+		setverdict(fail, "no A record for ", f_local_name());
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
 /* The count in the header has to agree with what follows it, otherwise a
  * resolver either stops early or reads past the end of the message.
  */
@@ -366,6 +411,7 @@ control {
 	execute(tc_unknown_name_is_ignored());
 	execute(tc_unknown_type_is_ignored());
 	execute(tc_multiple_answers_share_the_name());
+	execute(tc_legacy_query_is_answered_conventionally());
 	execute(tc_answer_count_matches());
 }
 
