@@ -1,0 +1,712 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Conformance tests for Zephyr's TCP, RFC 9293.
+ *
+ * The tester builds every header itself, down to the ethernet one, and reads
+ * frames off the link. Nothing is compiled into Zephyr for these tests and
+ * there is no control channel: the system under test is an ordinary
+ * application, a server that echoes and a client that connects out, so the TCP
+ * being exercised is the one that ships rather than one built for testing.
+ *
+ * Working this far down means answering address resolution as well. On a link
+ * whose Linux side has no address nothing else will, and a system under test
+ * that cannot resolve the tester cannot reply to it, so every wait for a
+ * segment answers any request that arrives while it waits.
+ *
+ * The scenarios come from the suite Intel published for the TCP rewrite, which
+ * covered handshake, data, sequence wrap, window, retransmission and malformed
+ * segments. That suite asserted Zephyr's internal state through a test protocol
+ * channel; these tests assert what is on the wire instead, so they say nothing
+ * about how the stack is written.
+ *
+ * The system under test is tests/net/conformance/tcp in the Zephyr tree.
+ */
+module TCP_Suite {
+
+import from General_Types all;
+import from ARP_Types all;
+import from IP_Types all;
+import from TCP_Types all;
+import from Ethernet_Port all;
+import from TCCConversion_Functions all;
+import from Zephyr_SUT all;
+
+modulepar charstring tsp_tester_mac := "020000000002";
+
+/* The port the system under test echoes on, the one it connects out to, and
+ * one nothing listens on.
+ */
+modulepar integer tsp_echo_port := 4242;
+modulepar integer tsp_connect_port := 4243;
+modulepar integer tsp_closed_port := 4299;
+
+const OCT2 c_ethertype_ipv4 := '0800'O;
+
+type component TCP_MTC {
+	port Ethernet_PT pt;
+	timer t_guard;
+
+	/* What the tester has learned about the other end of the link. */
+	var OCT6 v_sut_mac := '000000000000'O;
+
+	/* Where the connection under test has got to. */
+	var integer v_local_port := 0;
+	var integer v_snd := 0;		/* what the tester will send next */
+	var integer v_rcv := 0;		/* what the tester expects next */
+	var boolean v_established := false;
+}
+
+/*
+ * Addresses
+ */
+
+function f_mac(in charstring p_mac) return OCT6
+{
+	return str2oct(p_mac);
+}
+
+function f_ipv4(in charstring p_addr) return OCT4
+{
+	return f_convertIPAddrToBinary(p_addr);
+}
+
+/*
+ * Building and sending
+ */
+
+/* Wrap a TCP segment in IP and ethernet and put it on the link. The encoders
+ * fill in the lengths and both checksums, which is the main reason for using
+ * the protocol modules rather than writing the headers out here.
+ */
+function f_send_tcp(in PDU_TCP p_tcp, in OCT6 p_eth_dst,
+		    in boolean p_auto_offset := true) runs on TCP_MTC
+{
+	var octetstring v_src := f_ipv4(tsp_tester_ipv4);
+	var octetstring v_dst := f_ipv4(tsp_sut_ipv4);
+	var octetstring v_segment := f_enc_PDU_TCP(v_src, v_dst, p_tcp,
+						   p_auto_offset, true);
+	var IPv4_packet v_ip;
+
+	v_ip := {
+		header := {
+			ver := 4,
+			hlen := 5,
+			tos := 0,
+			tlen := 20 + lengthof(v_segment),
+			id := 0,
+			res := '0'B,
+			dfrag := '1'B,
+			mfrag := '0'B,
+			foffset := 0,
+			ttl := 64,
+			proto := 6,
+			cksum := 0,
+			srcaddr := v_src,
+			dstaddr := v_dst
+		},
+		ext_headers := omit,
+		payload := v_segment
+	};
+
+	pt.send(Ethernet_Frame:{
+		destination := p_eth_dst,
+		source := f_mac(tsp_tester_mac),
+		etherType := c_ethertype_ipv4,
+		payload := f_ipv4_with_checksum(v_ip)
+	});
+}
+
+/* The encoder fills in the total length but not the header checksum, and a
+ * header whose checksum is wrong is dropped before anything looks at what is
+ * inside it. Work it out over the encoded header and put it in place, rather
+ * than through the record field, so that no byte order question arises.
+ */
+function f_ipv4_with_checksum(in IPv4_packet p_ip) return octetstring
+{
+	var octetstring v_bytes := f_IPv4_enc(p_ip);
+	var OCT2 v_sum := f_IPv4_checksum(substr(v_bytes, 0, 20));
+
+	return replace(v_bytes, 10, 2, v_sum);
+}
+
+template PDU_TCP t_segment(in integer p_dst_port, in integer p_seq,
+			   in integer p_ack, in TCP_Control_bits p_flags,
+			   in integer p_window := 4096) := {
+	source_port := 0,
+	dest_port := p_dst_port,
+	sequence_number := p_seq,
+	acknowledgment_number := p_ack,
+	data_offset := 5,
+	reserved := '000000'B,
+	control_bits := p_flags,
+	window := p_window,
+	checksum := '0000'O,
+	urgent_pointer := 0,
+	options := omit,
+	data := omit
+}
+
+const TCP_Control_bits c_syn := { urg := '0'B, ack := '0'B, psh := '0'B,
+				  rst := '0'B, syn := '1'B, fin := '0'B };
+const TCP_Control_bits c_syn_ack := { urg := '0'B, ack := '1'B, psh := '0'B,
+				      rst := '0'B, syn := '1'B, fin := '0'B };
+const TCP_Control_bits c_ack := { urg := '0'B, ack := '1'B, psh := '0'B,
+				  rst := '0'B, syn := '0'B, fin := '0'B };
+const TCP_Control_bits c_psh_ack := { urg := '0'B, ack := '1'B, psh := '1'B,
+				      rst := '0'B, syn := '0'B, fin := '0'B };
+const TCP_Control_bits c_fin_ack := { urg := '0'B, ack := '1'B, psh := '0'B,
+				      rst := '0'B, syn := '0'B, fin := '1'B };
+const TCP_Control_bits c_rst := { urg := '0'B, ack := '0'B, psh := '0'B,
+				  rst := '1'B, syn := '0'B, fin := '0'B };
+
+function f_send(in integer p_dst_port, in TCP_Control_bits p_flags,
+		in octetstring p_data := ''O) runs on TCP_MTC
+{
+	var PDU_TCP v_tcp := valueof(t_segment(p_dst_port, v_snd, v_rcv, p_flags));
+
+	v_tcp.source_port := v_local_port;
+
+	if (lengthof(p_data) > 0) {
+		v_tcp.data := p_data;
+	}
+
+	f_send_tcp(v_tcp, v_sut_mac);
+
+	/* A synchronise or a finish takes a sequence number of its own. */
+	v_snd := (v_snd + lengthof(p_data)) mod 4294967296;
+
+	if (p_flags.syn == '1'B) {
+		v_snd := (v_snd + 1) mod 4294967296;
+	}
+	if (p_flags.fin == '1'B) {
+		v_snd := (v_snd + 1) mod 4294967296;
+	}
+}
+
+/*
+ * Address resolution, which this suite serves rather than tests
+ */
+
+function f_answer_arp(in Ethernet_Frame p_frame) runs on TCP_MTC return boolean
+{
+	var bitstring v_bits := oct2bit(p_frame.payload);
+	var ARP_Packet v_arp;
+	var ARP_Packet v_reply;
+
+	if (p_frame.etherType != c_ethertype_arp) {
+		return false;
+	}
+
+	if (decvalue(v_bits, v_arp) != 0) {
+		return true;
+	}
+
+	/* Remember where the other end is, whatever it was asking. */
+	if (v_arp.senderProtoAddr == f_ipv4(tsp_sut_ipv4)) {
+		v_sut_mac := v_arp.senderHwAddr;
+	}
+
+	if (v_arp.operation != c_arp_request or
+	    v_arp.targetProtoAddr != f_ipv4(tsp_tester_ipv4)) {
+		return true;
+	}
+
+	v_reply := {
+		hwType := c_arp_hw_ethernet,
+		protoType := c_arp_proto_ipv4,
+		hwLen := 6,
+		protoLen := 4,
+		operation := c_arp_reply,
+		senderHwAddr := f_mac(tsp_tester_mac),
+		senderProtoAddr := f_ipv4(tsp_tester_ipv4),
+		targetHwAddr := v_arp.senderHwAddr,
+		targetProtoAddr := v_arp.senderProtoAddr
+	};
+
+	pt.send(Ethernet_Frame:{
+		destination := v_arp.senderHwAddr,
+		source := f_mac(tsp_tester_mac),
+		etherType := c_ethertype_arp,
+		payload := bit2oct(encvalue(v_reply))
+	});
+
+	return true;
+}
+
+/*
+ * Waiting
+ */
+
+/* Wait for a TCP segment from the system under test, answering address
+ * resolution and ignoring anything else that arrives meanwhile. Fails the test
+ * case and stops it if nothing comes, so callers can use the result directly.
+ */
+function f_await_tcp(in float p_timeout := -1.0) runs on TCP_MTC return PDU_TCP
+{
+	var Ethernet_Frame v_frame;
+	var IPv4_packet v_ip;
+	var float v_timeout := p_timeout;
+
+	if (v_timeout < 0.0) {
+		v_timeout := tsp_response_timeout;
+	}
+
+	t_guard.start(v_timeout);
+	alt {
+	[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+		if (f_answer_arp(v_frame)) {
+			repeat;
+		}
+
+		if (v_frame.etherType != c_ethertype_ipv4) {
+			repeat;
+		}
+
+		v_ip := f_IPv4_dec(v_frame.payload);
+
+		if (v_ip.header.proto != 6 or not ispresent(v_ip.payload)) {
+			repeat;
+		}
+
+		if (v_ip.header.srcaddr != f_ipv4(tsp_sut_ipv4)) {
+			repeat;
+		}
+
+		t_guard.stop;
+		v_sut_mac := v_frame.source;
+
+		return f_dec_PDU_TCP(v_ip.payload);
+	}
+	[] t_guard.timeout {
+		setverdict(fail, "no segment within ", v_timeout, "s");
+		stop;
+	}
+	}
+
+	/* Unreachable, but the compiler wants a return on every path. */
+	return f_dec_PDU_TCP(''O);
+}
+
+/* Wait for a segment belonging to the connection under test. Anything else on
+ * the link, including the connection attempts the system under test makes of
+ * its own accord, is skipped.
+ */
+function f_await_segment(in float p_timeout := -1.0) runs on TCP_MTC return PDU_TCP
+{
+	for (var integer i := 0; i < 20; i := i + 1) {
+		var PDU_TCP v_tcp := f_await_tcp(p_timeout);
+
+		if (v_tcp.dest_port == v_local_port) {
+			return v_tcp;
+		}
+	}
+
+	setverdict(fail, "nothing for this connection among the segments seen");
+	stop;
+}
+
+/* Require that the connection under test hears nothing more. */
+function f_expect_no_segment(in charstring p_why) runs on TCP_MTC
+{
+	var Ethernet_Frame v_frame;
+	var IPv4_packet v_ip;
+	var PDU_TCP v_tcp;
+
+	t_guard.start(tsp_silence_timeout);
+	alt {
+	[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+		if (f_answer_arp(v_frame) or v_frame.etherType != c_ethertype_ipv4) {
+			repeat;
+		}
+
+		v_ip := f_IPv4_dec(v_frame.payload);
+		if (v_ip.header.proto != 6 or not ispresent(v_ip.payload)) {
+			repeat;
+		}
+
+		v_tcp := f_dec_PDU_TCP(v_ip.payload);
+		if (v_tcp.dest_port != v_local_port) {
+			repeat;
+		}
+
+		t_guard.stop;
+		setverdict(fail, "it answered when it should not have: ", p_why);
+	}
+	[] t_guard.timeout {
+		setverdict(pass);
+	}
+	}
+}
+
+/*
+ * Opening and closing
+ */
+
+function f_open(in integer p_local_port) runs on TCP_MTC
+{
+	map(mtc:pt, system:pt);
+
+	v_local_port := p_local_port;
+	v_snd := 0;
+	v_rcv := 0;
+	v_established := false;
+	v_sut_mac := c_mac_broadcast;
+}
+
+/* Tear any connection down before leaving, so that the next test case starts
+ * against a system under test that is listening again. The application accepts
+ * one connection at a time, so one left open would leave every test after it
+ * waiting for an answer that cannot come.
+ */
+/* Give the far side a moment. The stack acts on a reset at once, but the
+ * application behind it has to notice, close its side and come back round to
+ * accepting, and a connection opened in the same breath as the one before it
+ * was closed can arrive before that has happened.
+ */
+function f_settle() runs on TCP_MTC
+{
+	t_guard.start(1.0);
+	t_guard.timeout;
+}
+
+function f_close() runs on TCP_MTC
+{
+	if (v_established) {
+		f_send(tsp_echo_port, c_rst);
+		v_established := false;
+	}
+
+	unmap(mtc:pt, system:pt);
+}
+
+/* Learn where the other end is, so that segments can be addressed to it
+ * rather than broadcast. The system under test connects out on its own, so
+ * something from it arrives without having to be asked for.
+ */
+function f_learn_peer() runs on TCP_MTC
+{
+	var PDU_TCP v_ignored;
+
+	if (v_sut_mac != c_mac_broadcast) {
+		return;
+	}
+
+	v_ignored := f_await_tcp();
+}
+
+/* The three way handshake, from the tester's side. Leaves the connection open
+ * with the sequence numbers tracked.
+ */
+function f_handshake(in integer p_seq := 1000) runs on TCP_MTC return PDU_TCP
+{
+	var PDU_TCP v_synack;
+
+	f_learn_peer();
+
+	v_snd := p_seq;
+	v_rcv := 0;
+
+	f_send(tsp_echo_port, c_syn);
+
+	v_synack := f_await_segment();
+
+	if (v_synack.control_bits.syn != '1'B or v_synack.control_bits.ack != '1'B) {
+		setverdict(fail, "the answer to a synchronise is not a "&
+			   "synchronise and acknowledge");
+		f_close();
+		stop;
+	}
+
+	if (v_synack.acknowledgment_number != v_snd) {
+		setverdict(fail, "it acknowledged ", v_synack.acknowledgment_number,
+			   " rather than ", v_snd);
+	}
+
+	v_rcv := (v_synack.sequence_number + 1) mod 4294967296;
+	f_send(tsp_echo_port, c_ack);
+	v_established := true;
+
+	return v_synack;
+}
+
+/*
+ * Test cases
+ */
+
+/* A synchronise has to be answered with one that acknowledges it, and the
+ * connection has to come up. RFC 9293 3.5.
+ */
+testcase tc_handshake() runs on TCP_MTC
+{
+	var PDU_TCP v_synack;
+
+	f_open(40001);
+	v_synack := f_handshake();
+
+	setverdict(pass);
+	f_close();
+}
+
+/* The initial sequence number has to be hard to guess, otherwise anything that
+ * can reach the link can inject into a connection it cannot see. RFC 9293 3.4.
+ */
+testcase tc_initial_sequence_number_varies() runs on TCP_MTC
+{
+	var PDU_TCP v_first;
+	var PDU_TCP v_second;
+
+	f_open(40002);
+	v_first := f_handshake();
+
+	/* A second connection from a different port, so it is a new one rather
+	 * than a repeat of the first. The first is reset first, because the
+	 * application accepts one at a time.
+	 */
+	f_send(tsp_echo_port, c_rst);
+	v_established := false;
+	f_settle();
+	v_local_port := 40003;
+	v_second := f_handshake(2000);
+
+	if (v_first.sequence_number == v_second.sequence_number) {
+		setverdict(fail, "both connections started from the same "&
+			   "sequence number, so it is not random");
+	} else if (v_second.sequence_number == v_first.sequence_number + 1) {
+		setverdict(fail, "the sequence number counts up, so it is "&
+			   "predictable");
+	} else {
+		setverdict(pass);
+	}
+
+	f_close();
+}
+
+/* Data has to be acknowledged and, since the far side echoes, come back. What
+ * matters here is the accounting: the acknowledgement has to cover exactly
+ * what was sent.
+ */
+testcase tc_data_is_acknowledged_and_echoed() runs on TCP_MTC
+{
+	var octetstring v_data := '414243'O;
+	var PDU_TCP v_segment;
+	var PDU_TCP v_synack;
+	var integer v_expected;
+
+	f_open(40004);
+	v_synack := f_handshake();
+
+	v_expected := (v_snd + lengthof(v_data)) mod 4294967296;
+	f_send(tsp_echo_port, c_psh_ack, v_data);
+
+	/* The echo may come with the acknowledgement or after it. */
+	for (var integer i := 0; i < 4; i := i + 1) {
+		v_segment := f_await_segment();
+
+		if (v_segment.acknowledgment_number != v_expected) {
+			setverdict(fail, "it acknowledged ",
+				   v_segment.acknowledgment_number,
+				   " rather than ", v_expected);
+		}
+
+		if (ispresent(v_segment.data) and lengthof(v_segment.data) > 0) {
+			if (v_segment.data != v_data) {
+				setverdict(fail, "it echoed something else");
+			}
+
+			setverdict(pass);
+			f_close();
+			stop;
+		}
+	}
+
+	setverdict(fail, "the data was never echoed back");
+	f_close();
+}
+
+/* A synchronise to a port nothing listens on has to be refused, and refused
+ * with a reset rather than by silence: a client that hears nothing waits for
+ * its timeout instead of failing at once. RFC 9293 3.10.7.2.
+ */
+testcase tc_closed_port_is_reset() runs on TCP_MTC
+{
+	var PDU_TCP v_answer;
+
+	f_open(40005);
+	f_learn_peer();
+
+	v_snd := 3000;
+	v_rcv := 0;
+	f_send(tsp_closed_port, c_syn);
+
+	v_answer := f_await_segment();
+
+	if (v_answer.control_bits.rst != '1'B) {
+		setverdict(fail, "a synchronise to a port nothing listens on "&
+			   "was answered with something other than a reset");
+	} else if (v_answer.acknowledgment_number != v_snd) {
+		setverdict(fail, "the reset acknowledges ",
+			   v_answer.acknowledgment_number, " rather than ", v_snd);
+	} else {
+		setverdict(pass);
+	}
+
+	f_close();
+}
+
+/* A finish has to be acknowledged, and the far side has to send one of its own
+ * once it has nothing left to say. RFC 9293 3.5.
+ */
+testcase tc_close_is_completed() runs on TCP_MTC
+{
+	var PDU_TCP v_segment;
+	var PDU_TCP v_synack;
+	var boolean v_acked := false;
+	var boolean v_finished := false;
+
+	f_open(40006);
+	v_synack := f_handshake();
+
+	f_send(tsp_echo_port, c_fin_ack);
+
+	for (var integer i := 0; i < 4 and not (v_acked and v_finished);
+	     i := i + 1) {
+		v_segment := f_await_segment();
+
+		if (v_segment.acknowledgment_number == v_snd) {
+			v_acked := true;
+		}
+
+		if (v_segment.control_bits.fin == '1'B) {
+			v_finished := true;
+		}
+	}
+
+	if (not v_acked) {
+		setverdict(fail, "the finish was never acknowledged");
+	} else if (not v_finished) {
+		setverdict(fail, "it never finished its own side");
+	} else {
+		setverdict(pass);
+	}
+
+	v_established := false;
+	f_close();
+}
+
+/* A segment claiming a header shorter than a header has to be dropped rather
+ * than parsed. Acting on one means reading fields out of the payload.
+ */
+testcase tc_undersized_data_offset_is_dropped() runs on TCP_MTC
+{
+	var PDU_TCP v_tcp;
+
+	f_open(40007);
+	f_learn_peer();
+
+	v_snd := 4000;
+	v_rcv := 0;
+
+	v_tcp := valueof(t_segment(tsp_echo_port, v_snd, 0, c_syn));
+	v_tcp.source_port := v_local_port;
+	/* Four words, one short of the smallest header there is. The encoder
+	 * is told not to work the offset out for itself.
+	 */
+	v_tcp.data_offset := 4;
+
+	f_send_tcp(v_tcp, v_sut_mac, false);
+
+	f_expect_no_segment("the segment claimed a header shorter than a header");
+	f_close();
+}
+
+/* Sequence numbers wrap, and a connection whose numbers wrap during it has to
+ * keep working. Starting just below the wrap makes it happen at once rather
+ * than after four gigabytes: the synchronise takes 4294967293, the four bytes
+ * of data 4294967294, 4294967295, 0 and 1, so the data itself straddles the
+ * wrap and the acknowledgement that covers it is 2.
+ */
+testcase tc_sequence_number_wraps() runs on TCP_MTC
+{
+	var octetstring v_data := '5758595A'O;
+	var PDU_TCP v_segment;
+	var PDU_TCP v_synack;
+	var integer v_expected;
+
+	f_open(40008);
+	v_synack := f_handshake(4294967293);
+
+	v_expected := (v_snd + lengthof(v_data)) mod 4294967296;
+	f_send(tsp_echo_port, c_psh_ack, v_data);
+
+	for (var integer i := 0; i < 4; i := i + 1) {
+		v_segment := f_await_segment();
+
+		if (v_segment.acknowledgment_number == v_expected) {
+			setverdict(pass);
+			f_close();
+			stop;
+		}
+	}
+
+	setverdict(fail, "the acknowledgement never covered the data sent "&
+		   "across the wrap");
+	f_close();
+}
+
+/* When the system under test is the one connecting, its synchronise has to say
+ * who it is and what it will accept.
+ */
+testcase tc_outbound_connect_is_well_formed() runs on TCP_MTC
+{
+	var PDU_TCP v_syn;
+
+	f_open(tsp_connect_port);
+
+	for (var integer i := 0; i < 20; i := i + 1) {
+		var PDU_TCP v_tcp := f_await_tcp();
+
+		if (v_tcp.dest_port == tsp_connect_port and
+		    v_tcp.control_bits.syn == '1'B) {
+			v_syn := v_tcp;
+
+			if (v_syn.control_bits.ack != '0'B) {
+				setverdict(fail, "the opening synchronise "&
+					   "acknowledges something");
+			}
+			if (v_syn.data_offset < 5) {
+				setverdict(fail, "the header is shorter than a header");
+			}
+			if (v_syn.window == 0) {
+				setverdict(fail, "it opened a connection it will "&
+					   "accept nothing on");
+			}
+			if (v_syn.source_port == 0) {
+				setverdict(fail, "it connected from port zero");
+			}
+
+			setverdict(pass);
+			f_close();
+			stop;
+		}
+	}
+
+	setverdict(fail, "it never tried to connect");
+	f_close();
+}
+
+control {
+	execute(tc_outbound_connect_is_well_formed());
+	execute(tc_handshake());
+	execute(tc_initial_sequence_number_varies());
+	execute(tc_data_is_acknowledged_and_echoed());
+	execute(tc_closed_port_is_reset());
+	execute(tc_close_is_completed());
+	execute(tc_undersized_data_offset_is_dropped());
+	execute(tc_sequence_number_wraps());
+}
+
+}

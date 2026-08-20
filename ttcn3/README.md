@@ -16,6 +16,7 @@ needed: the system under test is an ordinary sample application.
 | `coap` | `tests/net/conformance/coap` | The ETSI derived CoAP core test cases, run against a server exposing /test |
 | `dhcpv4` | `tests/net/conformance/dhcpv4` | Discover shape, retransmission, and the offer, request and acknowledge exchange |
 | `arp` | `tests/net/conformance/arp` | Answering for its own address, staying quiet about others, and asking before it sends |
+| `tcp` | `tests/net/conformance/tcp` | Handshake and sequence accounting, initial sequence numbers, data, close, reset, malformed segments, sequence wrap |
 
 ## Getting a Titan
 
@@ -57,7 +58,7 @@ cd suites/mdns/build && ./mdns ../mdns.cfg
 A suite that has to bind a privileged port, or read frames off the link, says
 `PRIVILEGED=yes` in its `build.conf` and has to be run as root. `dhcpv4` does
 because DHCP is defined on ports 67 and 68 and there is no way to move it;
-`arp` does because reading frames needs a packet socket.
+`arp` and `tcp` do because reading frames needs a packet socket.
 
 A suite that works below the IP layer also says `L2=yes`, and uses a second
 interface described by `../zeth-l2.conf`. That interface is given no IP
@@ -159,6 +160,20 @@ behind that you cannot delete:
 docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/ttcn3" -w /ttcn3 \
        net-tools-ttcn3 ./build.sh mdns
 ```
+
+## The older TCP suite
+
+Intel published a TTCN-3 TCP suite in the `net-test-suites` repository, for the
+TCP rewrite. Its scenarios informed what the `tcp` suite covers, but none of its
+code is used, and it is not a starting point to return to.
+
+Forty-one of its forty-three test cases drive Zephyr through a JSON control
+channel rather than over the wire, and its central assertion compares the
+stack's internal TCP state name against an expected one. That tests the
+implementation rather than the protocol, breaks whenever the internals are
+renamed, and needs `CONFIG_NET_TEST_PROTOCOL`, which deliberately turns off
+initial sequence number randomisation — so it exercises a TCP that is not the
+one that ships. What it had that is worth keeping is the list of scenarios.
 
 ## Known gaps and divergences
 
