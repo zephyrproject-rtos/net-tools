@@ -1,0 +1,350 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Conformance tests for the Zephyr DHCPv4 client.
+ *
+ * The tester is the server. It listens on the port DHCP servers listen on,
+ * which is why this suite needs to be allowed a privileged port: the ports
+ * are written into RFC 2131 and cannot be moved.
+ *
+ * Answers go to the broadcast address rather than to the client. A client
+ * that has not been given an address yet cannot be reached at one, and
+ * reaching it by hardware address instead would mean writing the frame
+ * ourselves.
+ *
+ * The system under test is tests/net/conformance/dhcpv4 in the Zephyr tree.
+ */
+module DHCPv4_Suite {
+
+import from General_Types all;
+import from DHCP_Types all;
+import from DHCP_Options all;
+import from IPL4asp_Types all;
+import from IPL4asp_PortType all;
+import from TCCConversion_Functions all;
+import from Zephyr_SUT all;
+import from Zephyr_Transport all;
+
+/* Fixed by RFC 2131 2. */
+const integer c_server_port := 67;
+const integer c_client_port := 68;
+
+const charstring c_broadcast := "255.255.255.255";
+
+/* What the tester hands out. Anything on the link will do: the tests look at
+ * what the client says, not at what it does with the address afterwards.
+ */
+modulepar charstring tsp_offered_address := "192.0.2.100";
+modulepar charstring tsp_subnet_mask := "255.255.255.0";
+modulepar integer tsp_lease_time := 600;
+
+type component DHCPv4_MTC extends Zephyr_Tester {
+	/* Replies go out through a second socket, see f_open. */
+	var ConnectionId v_reply_connId := -1;
+}
+
+/* Two sockets on the same port, for the two halves of the exchange.
+ *
+ * Messages arrive addressed to the broadcast address, which only a socket
+ * bound to the wildcard address sees. Replies go to the broadcast address in
+ * turn, and a socket bound to the wildcard has nothing to say which link that
+ * means, so the reply would leave through whichever interface the host routes
+ * a broadcast to. Binding the second socket to the address facing the device
+ * settles it.
+ */
+function f_open() runs on DHCPv4_MTC
+{
+	f_udp_listen("0.0.0.0", c_server_port, true);
+	v_reply_connId := f_udp_open(tsp_tester_ipv4, c_server_port, true);
+}
+
+function f_close_all() runs on DHCPv4_MTC
+{
+	if (v_reply_connId != -1) {
+		f_IPL4_close(pt, v_reply_connId);
+		v_reply_connId := -1;
+	}
+
+	f_close();
+}
+
+/* Wait for the next message from the client and hand back the BOOTP request
+ * inside it. Fails the test case and stops it if nothing arrives or if what
+ * arrives is not a request, so callers can use the result directly.
+ */
+function f_await_request() runs on DHCPv4_MTC return DHCP_MSG
+{
+	var ASP_RecvFrom v_recv := f_receive();
+	var PDU_DHCP v_pdu := dec_PDU_DHCP(v_recv.msg);
+
+	if (ischosen(v_pdu.erroneousPDU)) {
+		setverdict(fail, "the client sent something that is not a DHCP message");
+		stop;
+	}
+
+	if (not ischosen(v_pdu.bOOT_REQUEST)) {
+		setverdict(fail, "the client sent a reply rather than a request");
+		stop;
+	}
+
+	return v_pdu.bOOT_REQUEST;
+}
+
+/* The message type is an option rather than a field, so it has to be looked
+ * up. A message without one is not a DHCP message at all, only BOOTP.
+ */
+function f_message_type(in DHCP_MSG p_msg) runs on DHCPv4_MTC return DHCP_Message_Types
+{
+	if (not ispresent(p_msg.options)) {
+		setverdict(fail, "the message carries no options at all");
+		stop;
+	}
+
+	for (var integer i := 0; i < lengthof(p_msg.options.options); i := i + 1) {
+		if (ischosen(p_msg.options.options[i].message_type)) {
+			return p_msg.options.options[i].message_type.val;
+		}
+	}
+
+	setverdict(fail, "the message carries no message type option");
+	stop;
+}
+
+function f_has_option(in DHCP_MSG p_msg, in DHCP_Option_Type p_code) return boolean
+{
+	if (not ispresent(p_msg.options)) {
+		return false;
+	}
+
+	for (var integer i := 0; i < lengthof(p_msg.options.options); i := i + 1) {
+		var DHCP_GENERAL_OPTION v_general;
+
+		if (ischosen(p_msg.options.options[i].general)) {
+			v_general := p_msg.options.options[i].general;
+			if (oct2int(v_general.code) == enum2int(p_code)) {
+				return true;
+			}
+			continue;
+		}
+
+		select (p_code) {
+		case (DHCP_Message_Type_OPTION_TYPE) {
+			if (ischosen(p_msg.options.options[i].message_type)) { return true; }
+		}
+		case (DHCP_Parameter_request_list_OPTION_TYPE) {
+			if (ischosen(p_msg.options.options[i].parameter_request_list)) { return true; }
+		}
+		case (DHCP_Requested_IP_Address_OPTION_TYPE) {
+			if (ischosen(p_msg.options.options[i].requested_IP_address)) { return true; }
+		}
+		case (DHCP_Server_Identifier_OPTION_TYPE) {
+			if (ischosen(p_msg.options.options[i].server_identifier)) { return true; }
+		}
+		case else { }
+		}
+	}
+
+	return false;
+}
+
+/* A reply that mirrors the request it answers: same transaction, same
+ * hardware address, and the address the tester is handing out.
+ */
+function f_reply(in DHCP_MSG p_request, in DHCP_Message_Types p_type) runs on DHCPv4_MTC
+{
+	var octetstring v_server := f_convertIPAddrToBinary(tsp_tester_ipv4);
+	var PDU_DHCP v_pdu;
+
+	v_pdu := {
+		bOOT_REPLY := {
+			op := 2,
+			htype := DHCP_HTYPE_Ethernet_10Mb,
+			hlen := 6,
+			hops := 0,
+			xid := p_request.xid,
+			secs := 0,
+			flags := p_request.flags,
+			ciaddr := '00000000'O,
+			yiaddr := f_convertIPAddrToBinary(tsp_offered_address),
+			siaddr := v_server,
+			giaddr := '00000000'O,
+			chaddr := p_request.chaddr,
+			sname := { sname := "" },
+			file := { file := "" },
+			options := {
+				magicCookie := '63825363'O,
+				options := {
+					{ message_type := {
+						code := DHCP_Message_Type_OPTION_TYPE,
+						len := 1,
+						val := p_type } },
+					{ server_identifier := {
+						code := DHCP_Server_Identifier_OPTION_TYPE,
+						len := 4,
+						val := v_server } },
+					{ IP_address_lease_time := {
+						code := DHCP_IP_Address_Lease_Time_OPTION_TYPE,
+						len := 4,
+						val := tsp_lease_time } },
+					{ subnet_mask := {
+						code := DHCP_Subnet_Mask_OPTION_TYPE,
+						len := 4,
+						val := f_convertIPAddrToBinary(tsp_subnet_mask) } },
+					{ end := { code := DHCP_END_OPTION_TYPE } }
+				}
+			}
+		}
+	};
+
+	f_send_to(c_broadcast, c_client_port, enc_PDU_DHCP(v_pdu), v_reply_connId);
+}
+
+function f_check_request_shape(in DHCP_MSG p_msg) runs on DHCPv4_MTC
+{
+	if (p_msg.htype != DHCP_HTYPE_Ethernet_10Mb) {
+		setverdict(fail, "hardware type is ", p_msg.htype, " rather than ethernet");
+	}
+	if (p_msg.hlen != 6) {
+		setverdict(fail, "hardware address length is ", p_msg.hlen, " rather than 6");
+	}
+	if (p_msg.hops != 0) {
+		setverdict(fail, "hops is ", p_msg.hops,
+			   ", which only a relay agent should set");
+	}
+	if (p_msg.giaddr != '00000000'O) {
+		setverdict(fail, "the relay agent address is set on a message from a client");
+	}
+	if (not ispresent(p_msg.options)) {
+		setverdict(fail, "the message carries no options");
+		return;
+	}
+	if (p_msg.options.magicCookie != '63825363'O) {
+		setverdict(fail, "the option field does not start with the magic cookie");
+	}
+}
+
+/* A discover has to say what it is and what it wants to be told, and leave
+ * the fields that belong to a server or a relay alone. RFC 2131 4.4.1.
+ */
+testcase tc_discover_is_well_formed() runs on DHCPv4_MTC
+{
+	var DHCP_MSG v_discover;
+
+	f_open();
+	v_discover := f_await_request();
+	f_check_request_shape(v_discover);
+
+	if (f_message_type(v_discover) != DHCP_Discover) {
+		setverdict(fail, "the first message is not a discover");
+	}
+	if (v_discover.ciaddr != '00000000'O) {
+		setverdict(fail, "a client with no address yet filled in ciaddr");
+	}
+	if (not f_has_option(v_discover, DHCP_Parameter_request_list_OPTION_TYPE)) {
+		setverdict(fail, "the discover asks for nothing, so a server has " &
+			   "no idea what to send back");
+	}
+
+	setverdict(pass);
+	f_close_all();
+}
+
+/* Answering a discover has to bring back a request naming the address that
+ * was offered and the server that offered it: without both, a client on a
+ * link with two servers cannot say which offer it took. Acknowledging that
+ * request finishes the exchange, after which the client has an address and
+ * no reason to keep asking. RFC 2131 4.3.2.
+ */
+testcase tc_exchange_completes() runs on DHCPv4_MTC
+{
+	var DHCP_MSG v_discover;
+	var DHCP_MSG v_request;
+
+	f_open();
+
+	v_discover := f_await_request();
+	if (f_message_type(v_discover) != DHCP_Discover) {
+		setverdict(fail, "expected a discover to answer");
+		f_close_all();
+		stop;
+	}
+
+	f_reply(v_discover, DHCP_Offer);
+
+	v_request := f_await_request();
+	f_check_request_shape(v_request);
+
+	if (f_message_type(v_request) != DHCP_Request) {
+		setverdict(fail, "the offer did not bring back a request");
+		f_close_all();
+		stop;
+	}
+	if (v_request.xid != v_discover.xid) {
+		setverdict(fail, "the request belongs to a different transaction " &
+			   "than the offer it answers");
+	}
+	if (v_request.chaddr != v_discover.chaddr) {
+		setverdict(fail, "the request carries a different hardware address");
+	}
+	if (not f_has_option(v_request, DHCP_Server_Identifier_OPTION_TYPE)) {
+		setverdict(fail, "the request does not say which server it is for");
+	}
+	if (not f_has_option(v_request, DHCP_Requested_IP_Address_OPTION_TYPE)) {
+		setverdict(fail, "the request does not say which address it wants");
+	}
+
+	f_reply(v_request, DHCP_Ack);
+
+	f_expect_silence("the exchange was acknowledged, so it is finished");
+	f_close_all();
+}
+
+/* A client whose discover goes unanswered has to keep asking rather than give
+ * up, otherwise a server that was slow to start is never found.
+ */
+testcase tc_unanswered_discover_is_repeated() runs on DHCPv4_MTC
+{
+	var DHCP_MSG v_first;
+	var DHCP_MSG v_next;
+
+	f_open();
+	v_first := f_await_request();
+	if (f_message_type(v_first) != DHCP_Discover) {
+		setverdict(fail, "the first message is not a discover");
+		f_close_all();
+		stop;
+	}
+
+	/* Say nothing, and wait for the client to ask again. */
+	v_next := f_await_request();
+	f_check_request_shape(v_next);
+
+	if (f_message_type(v_next) != DHCP_Discover) {
+		setverdict(fail, "the client moved on without ever being offered anything");
+	}
+	if (v_next.chaddr != v_first.chaddr) {
+		setverdict(fail, "the client changed its hardware address between discovers");
+	}
+
+	setverdict(pass);
+	f_close_all();
+}
+
+/* The acknowledged case runs last on purpose. It is the one that leaves the
+ * system under test holding an address, and a client that has one has no
+ * reason to ask for another, so nothing after it would see a discover.
+ */
+/* The order matters. Only one exchange can be completed, because a client
+ * that has been given an address stops asking for one, so the case that
+ * completes it runs last.
+ */
+control {
+	execute(tc_unanswered_discover_is_repeated());
+	execute(tc_discover_is_well_formed());
+	execute(tc_exchange_completes());
+}
+
+}

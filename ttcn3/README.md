@@ -14,6 +14,7 @@ needed: the system under test is an ordinary sample application.
 | `mdns` | `tests/net/conformance/mdns` | Name resolution over IPv4 and IPv6, record shape, silence for names the responder does not own |
 | `dns` | `tests/net/conformance/dns` | Query shape, identifier unpredictability, and what the resolver does with unanswered, forged and malformed answers |
 | `coap` | `tests/net/conformance/coap` | The ETSI derived CoAP core test cases, run against a server exposing /test |
+| `dhcpv4` | `tests/net/conformance/dhcpv4` | Discover shape, retransmission, and the offer, request and acknowledge exchange |
 
 ## Getting a Titan
 
@@ -51,6 +52,10 @@ Then build and run the suite:
 ./build.sh mdns
 cd suites/mdns/build && ./mdns ../mdns.cfg
 ```
+
+A suite that has to bind a privileged port says `PRIVILEGED=yes` in its
+`build.conf` and has to be run as root. Only `dhcpv4` does: DHCP is defined on
+ports 67 and 68 and there is no way to move it.
 
 A suite whose test cases create parallel test components cannot be run as one
 process. Those say `MODE=parallel` in a `build.conf`, and are run through the
@@ -120,8 +125,9 @@ To move a pin, change the commit in `modules.txt` and re-run
    writing them into the suite.
 3. If the suite needs a module that is not in `modules.txt` yet, add it there
    with a pinned commit.
-4. If its test cases create parallel test components, add a `build.conf`
-   saying `MODE=parallel`.
+4. If its test cases create parallel test components, or it has to bind a
+   privileged port, add a `build.conf` saying `MODE=parallel` or
+   `PRIVILEGED=yes`.
 5. Add a row to the table at the top of this file.
 
 ## Building in the container
