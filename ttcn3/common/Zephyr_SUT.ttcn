@@ -1,0 +1,45 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Settings shared by every suite: where the system under test is, where the
+ * tester is, and how long the tester waits. A suite should never hard code an
+ * address or a timeout; take it from here so that one configuration file can
+ * move a whole run onto a different link.
+ */
+module Zephyr_SUT {
+
+	/* Addresses of the Zephyr instance under test. These match the
+	 * defaults that the networking samples are configured with.
+	 */
+	modulepar charstring tsp_sut_ipv4 := "192.0.2.1";
+	modulepar charstring tsp_sut_ipv6 := "2001:db8::1";
+
+	/* Addresses of this tester, on the same link as the system under
+	 * test. On a Linux host these are the addresses of the zeth interface
+	 * that net-setup.sh creates.
+	 */
+	modulepar charstring tsp_tester_ipv4 := "192.0.2.2";
+	modulepar charstring tsp_tester_ipv6 := "2001:db8::2";
+
+	/* Interface on this host that faces the system under test. Sending to
+	 * a link local multicast group needs it: the address alone does not
+	 * say which link to send on, and binding a source address does not
+	 * settle it either.
+	 */
+	modulepar charstring tsp_tester_interface := "zeth";
+
+	/* Hostname the system under test answers to, without any domain. */
+	modulepar charstring tsp_sut_hostname := "zephyr";
+
+	/* How long to wait for an answer that is expected to arrive. */
+	modulepar float tsp_response_timeout := 5.0;
+
+	/* How long to wait before concluding that nothing is going to arrive.
+	 * Only ever spent by test cases that require silence, so keep it
+	 * short enough that a suite of them still finishes quickly.
+	 */
+	modulepar float tsp_silence_timeout := 2.0;
+}

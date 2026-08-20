@@ -1,0 +1,13 @@
+# Third party TTCN-3 modules that the suites build against.
+#
+# Format: <repository name> <commit>
+#
+# The repositories live under https://gitlab.eclipse.org/eclipse/titan/ and are
+# cloned by fetch-modules.sh into modules/. Commits are pinned so that a suite
+# that passes today still builds tomorrow; see README.md for how to move a pin.
+
+titan.ProtocolModules.DNS                         8501da2fdfd0bd928025152801ac19973aca5891
+titan.TestPorts.IPL4asp                           a4d5c2992368bc7b702759887e54b64a44c54de0
+titan.TestPorts.Common_Components.Abstract_Socket f6b2d2ba3f486dea778e108ce60e02a3fcae9ff8
+titan.TestPorts.Common_Components.Socket-API      37f8b1f04c0d6627bf5dbaf3b533bc5606f19b9c
+titan.Libraries.TCCUsefulFunctions                b3801bffc18d285fe541a6cf48c1193ad8472723

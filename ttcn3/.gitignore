@@ -1,0 +1,8 @@
+# Clones made by fetch-modules.sh.
+modules/
+
+# Per suite build trees made by build.sh.
+suites/*/build/
+
+# Logs left behind by a run.
+*.log

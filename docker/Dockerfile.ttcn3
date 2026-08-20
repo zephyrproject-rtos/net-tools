@@ -1,0 +1,46 @@
+# Adds a TTCN-3 toolchain to the net-tools image, for the protocol conformance
+# suites under ttcn3/.
+#
+# Build the net-tools image first, then this one:
+#
+#   docker build -t net-tools .
+#   docker build -t net-tools-ttcn3 -f Dockerfile.ttcn3 .
+#
+# Titan is built from source rather than taken from the distribution, because
+# the packaged version trails the protocol modules the suites build against.
+# The build takes a while; the layer is cached, so it happens once.
+#
+# The build is serial on purpose. Parts of the runtime include headers that
+# another part generates, and a parallel make loses that race.
+
+FROM net-tools
+
+ARG TITAN_VERSION=11.2.1
+
+RUN apt update && apt install -y \
+    bison \
+    expect \
+    flex \
+    libedit-dev \
+    libncurses-dev \
+    libssl-dev \
+    libxml2-dev \
+    xutils-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV TTCN3_DIR=/opt/titan
+ENV PATH=/opt/titan/bin:$PATH
+ENV LD_LIBRARY_PATH=/opt/titan/lib
+
+RUN git clone https://gitlab.eclipse.org/eclipse/titan/titan.core.git /titan.core && \
+    cd /titan.core && \
+    git checkout "tags/$TITAN_VERSION" && \
+    printf '%s\n' \
+        'TTCN3_DIR := /opt/titan' \
+        'XMLDIR := /usr' \
+        'OPENSSL_DIR := /usr' \
+        'JNI := no' \
+        'GEN_PDF := no' \
+        > Makefile.personal && \
+    make install && \
+    rm -rf /titan.core

@@ -1,0 +1,429 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Conformance tests for the Zephyr mDNS responder.
+ *
+ * The tester queries the responder and checks what comes back. Queries go to
+ * the mDNS group address, because the responder binds its socket to the group
+ * rather than to the wildcard address and so never sees a query addressed
+ * directly to it. The tester's own port is ephemeral rather than 5353, which
+ * makes each query a legacy unicast query in the sense of RFC 6762 6.7, so the
+ * answers come back to the tester alone and no multicast group membership is
+ * needed on this side.
+ *
+ * The system under test is samples/net/mdns_responder.
+ *
+ * Because the tester queries from an ephemeral port, every exchange here is a
+ * legacy unicast query, and RFC 6762 6.7 asks for four things in the answer to
+ * one of those: the query identifier echoed back, the question repeated, the
+ * cache flush bit clear, and the TTL capped at ten seconds. The responder does
+ * none of them, because it does not tell a legacy query apart from any other:
+ * it answers with identifier zero, no question section, the cache flush bit
+ * set and the full ten minute TTL. That is correct for the multicast answers
+ * that a real mDNS resolver receives, since such a resolver queries from port
+ * 5353. The tests below therefore check what the responder actually does, and
+ * the two checks that encode a divergence are marked where they are made. If
+ * the responder ever learns about legacy queries, those checks will fail and
+ * should be changed deliberately rather than relaxed.
+ */
+module MDNS_Suite {
+
+import from DNS_Types all;
+import from IPL4asp_Types all;
+import from IPL4asp_PortType all;
+import from TCCConversion_Functions all;
+import from Zephyr_SUT all;
+
+/* The responder answers with this TTL, RFC 6762 10 recommends it for records
+ * that contain a host name.
+ */
+const octetstring c_mdns_ttl := int2oct(600, 4);
+
+/* Bit 15 of the class field of an answer asks the receiver to flush any
+ * cached record with the same name and type, RFC 6762 10.2.
+ */
+const RRClass c_class_in_flush := 32769;
+
+const charstring c_mdns_group_v4 := "224.0.0.251";
+const charstring c_mdns_group_v6 := "ff02::fb";
+const integer c_mdns_port := 5353;
+
+/* The IPv6 group is link local, so the address on its own does not say which
+ * link to send on. Naming the interface in the destination is what settles
+ * it; binding a source address is not enough.
+ */
+function f_mdns_group_v6() return charstring
+{
+	return c_mdns_group_v6 & "%" & tsp_tester_interface;
+}
+
+type component MDNS_MTC {
+	port IPL4asp_PT pt;
+	var ConnectionId v_connId := -1;
+	timer t_guard;
+}
+
+/* A query for one name and one type, as a resolver on the link would send it. */
+template PDU_DNS ts_query(charstring p_name, RRType p_type) := {
+	header := {
+		id := 0,
+		qr := DNS_QUERY,
+		opCode := DNS_OP_QUERY,
+		aa := false,
+		tc := false,
+		rd := false,
+		ra := false,
+		z := '000'B,
+		rCode := DNS_NO_ERROR,
+		qdCount := 1,
+		anCount := 0,
+		nsCount := 0,
+		arCount := 0
+	},
+	queries := { { qName := p_name, qType := p_type, qClass := DNS_IN } },
+	answers := {},
+	nameServerRecords := {},
+	additionalRecords := {}
+}
+
+/* Open an unconnected socket on the tester. It has to stay unconnected: the
+ * query goes to the group address but the answer comes from the address of
+ * the system under test, and a connected socket would discard it.
+ */
+function f_open(in charstring p_local_addr) runs on MDNS_MTC
+{
+	var Result v_res;
+
+	map(mtc:pt, system:pt);
+
+	v_res := f_IPL4_listen(pt, p_local_addr, 0, { udp := {} });
+	if (not ispresent(v_res.connId)) {
+		setverdict(fail, "cannot open a socket on ", p_local_addr);
+		stop;
+	}
+
+	v_connId := v_res.connId;
+}
+
+function f_close() runs on MDNS_MTC
+{
+	if (v_connId != -1) {
+		f_IPL4_close(pt, v_connId);
+		v_connId := -1;
+	}
+	unmap(mtc:pt, system:pt);
+}
+
+function f_send_query(in charstring p_group, in charstring p_name, in RRType p_type)
+runs on MDNS_MTC
+{
+	pt.send(ASP_SendTo:{
+		connId := v_connId,
+		remName := p_group,
+		remPort := c_mdns_port,
+		proto := omit,
+		msg := enc_PDU_DNS(valueof(ts_query(p_name, p_type)), false, true)
+	});
+}
+
+/* Wait for one answer and hand back the decoded message. Fails the test case
+ * and stops it if nothing arrives, so callers can assume a value.
+ */
+function f_await_response() runs on MDNS_MTC return PDU_DNS
+{
+	var ASP_RecvFrom v_recv;
+
+	t_guard.start(tsp_response_timeout);
+	alt {
+	[] pt.receive(ASP_RecvFrom:?) -> value v_recv {
+		t_guard.stop;
+	}
+	[] t_guard.timeout {
+		setverdict(fail, "no answer within ", tsp_response_timeout, "s");
+		stop;
+	}
+	}
+
+	if (v_recv.remName != tsp_sut_ipv4 and v_recv.remName != tsp_sut_ipv6) {
+		setverdict(fail, "answer came from ", v_recv.remName,
+			   " rather than from the system under test");
+	}
+
+	return dec_PDU_DNS(v_recv.msg);
+}
+
+/* Require that no answer arrives. Used where the responder is supposed to stay
+ * quiet, which for mDNS is how a name it does not own is refused.
+ */
+function f_await_silence() runs on MDNS_MTC
+{
+	var ASP_RecvFrom v_recv;
+
+	t_guard.start(tsp_silence_timeout);
+	alt {
+	[] pt.receive(ASP_RecvFrom:?) -> value v_recv {
+		t_guard.stop;
+		setverdict(fail, "answered a query it should have ignored");
+	}
+	[] t_guard.timeout {
+		setverdict(pass);
+	}
+	}
+}
+
+/* Every answer carries the queried name, the queried type, the cache flush
+ * bit and the host name TTL. Check that once, here, rather than in each test.
+ *
+ * The class and TTL checks encode the legacy unicast divergence described at
+ * the top of this module: RFC 6762 6.7 wants the cache flush bit clear and the
+ * TTL capped at ten seconds in an answer to a query from an ephemeral port.
+ */
+function f_check_answer_shape(in ResourceRecord p_rr, in charstring p_name, in RRType p_type)
+runs on MDNS_MTC
+{
+	if (p_rr.name != p_name) {
+		setverdict(fail, "answer names ", p_rr.name, " rather than ", p_name);
+	}
+	if (p_rr.rrType != p_type) {
+		setverdict(fail, "answer has type ", p_rr.rrType, " rather than ", p_type);
+	}
+	if (p_rr.rrClass != c_class_in_flush) {
+		setverdict(fail, "answer class is ", p_rr.rrClass,
+			   " rather than IN with the cache flush bit set");
+	}
+	if (p_rr.ttl != c_mdns_ttl) {
+		setverdict(fail, "answer TTL is ", p_rr.ttl, " rather than ", c_mdns_ttl);
+	}
+}
+
+/* The record data of an A or AAAA answer is the address either way, but a
+ * class with the cache flush bit set is not one the decoder recognises, so it
+ * hands the data back undecoded. Accept both forms.
+ */
+function f_rdata_address(in ResourceRecord p_rr) return octetstring
+{
+	if (ischosen(p_rr.rData.a)) {
+		return p_rr.rData.a;
+	}
+	if (ischosen(p_rr.rData.aaaa)) {
+		return p_rr.rData.aaaa;
+	}
+	if (ischosen(p_rr.rData.unsupported)) {
+		return p_rr.rData.unsupported;
+	}
+
+	return ''O;
+}
+
+/* True when the answers contain p_addr as an A record for p_name. */
+function f_has_a_record(in ResourceRecords p_rrs, in charstring p_name, in charstring p_addr)
+runs on MDNS_MTC return boolean
+{
+	var octetstring v_want := f_convertIPAddrToBinary(p_addr);
+
+	for (var integer i := 0; i < lengthof(p_rrs); i := i + 1) {
+		if (p_rrs[i].rrType != DNS_A) {
+			continue;
+		}
+		f_check_answer_shape(p_rrs[i], p_name, DNS_A);
+		if (f_rdata_address(p_rrs[i]) == v_want) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/* True when the answers contain p_addr as an AAAA record for p_name. */
+function f_has_aaaa_record(in ResourceRecords p_rrs, in charstring p_name, in charstring p_addr)
+runs on MDNS_MTC return boolean
+{
+	var octetstring v_want := f_convertIPAddrToBinary(p_addr);
+
+	for (var integer i := 0; i < lengthof(p_rrs); i := i + 1) {
+		if (p_rrs[i].rrType != DNS_AAAA) {
+			continue;
+		}
+		f_check_answer_shape(p_rrs[i], p_name, DNS_AAAA);
+		if (f_rdata_address(p_rrs[i]) == v_want) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+function f_local_name() return charstring
+{
+	return tsp_sut_hostname & ".local";
+}
+
+/* A query for the responder's own name over IPv4 is answered with its IPv4
+ * address.
+ */
+testcase tc_a_query() runs on MDNS_MTC
+{
+	var PDU_DNS v_rsp;
+
+	f_open(tsp_tester_ipv4);
+	f_send_query(c_mdns_group_v4, f_local_name(), DNS_A);
+	v_rsp := f_await_response();
+
+	if (v_rsp.header.qr != DNS_RESPONSE) {
+		setverdict(fail, "the answer is not marked as a response");
+	}
+	if (not v_rsp.header.aa) {
+		setverdict(fail, "the answer is not marked as authoritative");
+	}
+	if (lengthof(v_rsp.answers) < 1) {
+		setverdict(fail, "the answer carries no records");
+		f_close();
+		stop;
+	}
+	if (not f_has_a_record(v_rsp.answers, f_local_name(), tsp_sut_ipv4)) {
+		setverdict(fail, "no A record for ", f_local_name(),
+			   " holding ", tsp_sut_ipv4);
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/* A query for the responder's own name over IPv4 is answered with its IPv6
+ * addresses. The responder reports every address on the interface, so the
+ * link local one is there too; only the configured global address is
+ * required.
+ */
+testcase tc_aaaa_query() runs on MDNS_MTC
+{
+	var PDU_DNS v_rsp;
+
+	f_open(tsp_tester_ipv4);
+	f_send_query(c_mdns_group_v4, f_local_name(), DNS_AAAA);
+	v_rsp := f_await_response();
+
+	if (lengthof(v_rsp.answers) < 1) {
+		setverdict(fail, "the answer carries no records");
+		f_close();
+		stop;
+	}
+	if (not f_has_aaaa_record(v_rsp.answers, f_local_name(), tsp_sut_ipv6)) {
+		setverdict(fail, "no AAAA record for ", f_local_name(),
+			   " holding ", tsp_sut_ipv6);
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/* The same exchange carried over IPv6 rather than IPv4. */
+testcase tc_aaaa_query_over_ipv6() runs on MDNS_MTC
+{
+	var PDU_DNS v_rsp;
+
+	f_open(tsp_tester_ipv6);
+	f_send_query(f_mdns_group_v6(), f_local_name(), DNS_AAAA);
+	v_rsp := f_await_response();
+
+	if (lengthof(v_rsp.answers) < 1) {
+		setverdict(fail, "the answer carries no records");
+		f_close();
+		stop;
+	}
+	if (not f_has_aaaa_record(v_rsp.answers, f_local_name(), tsp_sut_ipv6)) {
+		setverdict(fail, "no AAAA record for ", f_local_name(),
+			   " holding ", tsp_sut_ipv6);
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/* A responder owns only its own names. RFC 6762 6 has it stay silent about
+ * anything else rather than answer with a name error, so that another
+ * responder on the link is free to claim the name.
+ */
+testcase tc_unknown_name_is_ignored() runs on MDNS_MTC
+{
+	f_open(tsp_tester_ipv4);
+	f_send_query(c_mdns_group_v4, "nosuchhost.local", DNS_A);
+	f_await_silence();
+	f_close();
+}
+
+/* A query for a type the responder has no record of is not answered either.
+ * The name is its own, so this separates "I do not own the name" from "I own
+ * the name but have nothing of that type".
+ */
+testcase tc_unknown_type_is_ignored() runs on MDNS_MTC
+{
+	f_open(tsp_tester_ipv4);
+	f_send_query(c_mdns_group_v4, f_local_name(), DNS_MX);
+	f_await_silence();
+	f_close();
+}
+
+/* More than one address of the same family is reported in one message, and
+ * every record after the first refers back to the name in the first rather
+ * than repeating it. Decoding the answer at all proves the back reference is
+ * well formed, since the decoder resolves it.
+ */
+testcase tc_multiple_answers_share_the_name() runs on MDNS_MTC
+{
+	var PDU_DNS v_rsp;
+
+	f_open(tsp_tester_ipv4);
+	f_send_query(c_mdns_group_v4, f_local_name(), DNS_AAAA);
+	v_rsp := f_await_response();
+
+	if (lengthof(v_rsp.answers) < 2) {
+		setverdict(pass, "only one address is configured, nothing to check");
+		f_close();
+		stop;
+	}
+
+	for (var integer i := 0; i < lengthof(v_rsp.answers); i := i + 1) {
+		f_check_answer_shape(v_rsp.answers[i], f_local_name(), DNS_AAAA);
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/* The count in the header has to agree with what follows it, otherwise a
+ * resolver either stops early or reads past the end of the message.
+ */
+testcase tc_answer_count_matches() runs on MDNS_MTC
+{
+	var PDU_DNS v_rsp;
+
+	f_open(tsp_tester_ipv4);
+	f_send_query(c_mdns_group_v4, f_local_name(), DNS_A);
+	v_rsp := f_await_response();
+
+	if (v_rsp.header.anCount != lengthof(v_rsp.answers)) {
+		setverdict(fail, "header claims ", v_rsp.header.anCount,
+			   " answers but carries ", lengthof(v_rsp.answers));
+	}
+	if (v_rsp.header.nsCount != 0 or v_rsp.header.arCount != 0) {
+		setverdict(fail, "the answer carries unexpected extra sections");
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+control {
+	execute(tc_a_query());
+	execute(tc_aaaa_query());
+	execute(tc_aaaa_query_over_ipv6());
+	execute(tc_unknown_name_is_ignored());
+	execute(tc_unknown_type_is_ignored());
+	execute(tc_multiple_answers_share_the_name());
+	execute(tc_answer_count_matches());
+}
+
+}
