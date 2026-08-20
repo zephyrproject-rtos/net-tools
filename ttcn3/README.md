@@ -11,7 +11,8 @@ needed: the system under test is an ordinary sample application.
 
 | Suite | System under test | What it covers |
 |---|---|---|
-| `mdns` | `samples/net/mdns_responder` | Name resolution over IPv4 and IPv6, record shape, silence for names the responder does not own |
+| `mdns` | `tests/net/conformance/mdns` | Name resolution over IPv4 and IPv6, record shape, silence for names the responder does not own |
+| `dns` | `tests/net/conformance/dns` | Query shape, identifier unpredictability, and what the resolver does with unanswered, forged and malformed answers |
 
 ## Getting a Titan
 
@@ -110,11 +111,32 @@ To move a pin, change the commit in `modules.txt` and re-run
    with a pinned commit.
 4. Add a row to the table at the top of this file.
 
-## Known divergences from the standard
+## Building in the container
+
+The image `docker/Dockerfile.ttcn3` builds carries a current Titan. Give it your
+own user id when building a suite through a bind mount, or it leaves artifacts
+behind that you cannot delete:
+
+```
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/ttcn3" -w /ttcn3 \
+       net-tools-ttcn3 ./build.sh mdns
+```
+
+## Known gaps and divergences
 
 Where a suite asserts behaviour that does not match the RFC, the assertion says
-so at the point it is made. Today that is RFC 6762 6.7 in the `mdns` suite: the
-responder does not distinguish a legacy unicast query, so its answers to one
-carry identifier zero, no question section, the cache flush bit set and the
-full TTL. Answers to a real mDNS resolver, which queries from port 5353, are
-not affected.
+so at the point it is made, so that the divergence is recorded rather than
+frozen in silently.
+
+**mDNS, RFC 6762 6.7.** The responder does not distinguish a legacy unicast
+query, which is what a query from a port other than 5353 is. Its answers to one
+carry identifier zero, no question section, the cache flush bit set and the full
+TTL, where the RFC asks for the identifier echoed, the question repeated, the
+cache flush bit clear and the TTL capped at ten seconds. Answers to a real mDNS
+resolver, which queries from port 5353, are not affected.
+
+**DNS, RFC 5452 9.2.** The resolver varies the query identifier, which the
+`dns` suite checks, but keeps one socket per server, so its source port is
+fixed for as long as it runs. The RFC asks for both to vary, because the two
+together are what an off path attacker has to guess. There is no test case for
+this: one that asserted the current behaviour would fail the day it improved.

@@ -1,0 +1,396 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Conformance tests for the Zephyr DNS resolver.
+ *
+ * Here the roles are the other way round from the mDNS suite: the tester is
+ * the server, and what is under test is what the resolver puts on the wire and
+ * what it does with what comes back. The system under test asks for the same
+ * name over and over, so a test case can collect as many queries as it needs
+ * without having to trigger anything.
+ *
+ * The resolver does not retransmit. A query that goes unanswered fails on the
+ * device and the next one follows, which is why the tests below talk about the
+ * next query rather than a retry.
+ *
+ * One thing is deliberately not tested. RFC 5452 9.2 asks a resolver to vary
+ * the source port between queries as well as the identifier, because the two
+ * together are what an off path attacker has to guess. The resolver keeps one
+ * socket per server, so its source port is fixed for as long as it runs. That
+ * is worth knowing, but a test that asserted it would fail the day it was
+ * improved, so it is recorded here rather than frozen into a test case.
+ *
+ * The system under test is tests/net/conformance/dns in the Zephyr tree.
+ */
+module DNS_Suite {
+
+import from DNS_Types all;
+import from IPL4asp_Types all;
+import from IPL4asp_PortType all;
+import from TCCConversion_Functions all;
+import from Zephyr_SUT all;
+
+/* Where the tester listens. Not port 53: this needs no privileges, and it
+ * cannot collide with a resolver already running on the host.
+ */
+modulepar integer tsp_dns_port := 15353;
+
+/* The name the system under test asks for. */
+modulepar charstring tsp_query_name := "conformance.test";
+
+/* How many queries the tests that look at several of them collect. */
+modulepar integer tsp_query_sample := 5;
+
+type component DNS_MTC {
+	port IPL4asp_PT pt;
+	var ConnectionId v_connId := -1;
+	timer t_guard;
+}
+
+/* What a query looked like, kept apart from the message itself so that a test
+ * can talk about where it came from.
+ */
+type record QuerySeen {
+	PDU_DNS pdu,
+	charstring fromAddr,
+	integer fromPort
+}
+
+type record of QuerySeen QueriesSeen;
+
+function f_open() runs on DNS_MTC
+{
+	var Result v_res;
+
+	map(mtc:pt, system:pt);
+
+	v_res := f_IPL4_listen(pt, tsp_tester_ipv4, tsp_dns_port, { udp := {} });
+	if (not ispresent(v_res.connId)) {
+		setverdict(fail, "cannot listen on ", tsp_tester_ipv4, ":", tsp_dns_port);
+		stop;
+	}
+
+	v_connId := v_res.connId;
+}
+
+function f_close() runs on DNS_MTC
+{
+	if (v_connId != -1) {
+		f_IPL4_close(pt, v_connId);
+		v_connId := -1;
+	}
+	unmap(mtc:pt, system:pt);
+}
+
+/* Wait for the next query. Fails the test case and stops it if the resolver
+ * has gone quiet, so callers can assume a value.
+ */
+function f_await_query() runs on DNS_MTC return QuerySeen
+{
+	var ASP_RecvFrom v_recv;
+
+	t_guard.start(tsp_response_timeout);
+	alt {
+	[] pt.receive(ASP_RecvFrom:?) -> value v_recv {
+		t_guard.stop;
+	}
+	[] t_guard.timeout {
+		setverdict(fail, "no query within ", tsp_response_timeout, "s");
+		stop;
+	}
+	}
+
+	return { pdu := dec_PDU_DNS(v_recv.msg),
+		 fromAddr := v_recv.remName,
+		 fromPort := v_recv.remPort };
+}
+
+function f_await_queries(in integer p_count) runs on DNS_MTC return QueriesSeen
+{
+	var QueriesSeen v_seen := {};
+
+	for (var integer i := 0; i < p_count; i := i + 1) {
+		v_seen[i] := f_await_query();
+	}
+
+	return v_seen;
+}
+
+/* Send raw octets back to whoever sent p_query. Used both for well formed
+ * answers and for the deliberately broken ones.
+ */
+function f_reply_raw(in QuerySeen p_query, in octetstring p_msg) runs on DNS_MTC
+{
+	pt.send(ASP_SendTo:{
+		connId := v_connId,
+		remName := p_query.fromAddr,
+		remPort := p_query.fromPort,
+		proto := omit,
+		msg := p_msg
+	});
+}
+
+/* A correct answer to p_query, carrying one A record for the queried name. */
+function f_answer(in QuerySeen p_query, in charstring p_addr) runs on DNS_MTC
+{
+	var octetstring v_rdata := f_convertIPAddrToBinary(p_addr);
+	var PDU_DNS v_rsp;
+
+	v_rsp := {
+		header := {
+			id := p_query.pdu.header.id,
+			qr := DNS_RESPONSE,
+			opCode := DNS_OP_QUERY,
+			aa := true,
+			tc := false,
+			rd := p_query.pdu.header.rd,
+			ra := true,
+			z := '000'B,
+			rCode := DNS_NO_ERROR,
+			qdCount := 1,
+			anCount := 1,
+			nsCount := 0,
+			arCount := 0
+		},
+		queries := p_query.pdu.queries,
+		answers := {
+			{
+				name := tsp_query_name,
+				rrType := DNS_A,
+				rrClass := DNS_IN,
+				ttl := int2oct(30, 4),
+				rdLength := lengthof(v_rdata),
+				rData := { a := v_rdata }
+			}
+		},
+		nameServerRecords := {},
+		additionalRecords := {}
+	};
+
+	f_reply_raw(p_query, enc_PDU_DNS(v_rsp, false, true));
+}
+
+function f_check_query_shape(in PDU_DNS p_query) runs on DNS_MTC
+{
+	if (p_query.header.qr != DNS_QUERY) {
+		setverdict(fail, "the query is marked as a response");
+	}
+	if (p_query.header.opCode != DNS_OP_QUERY) {
+		setverdict(fail, "opcode is ", p_query.header.opCode,
+			   " rather than a standard query");
+	}
+	if (not p_query.header.rd) {
+		setverdict(fail, "recursion desired is not set, so a recursive " &
+			   "server would not resolve the name");
+	}
+	if (p_query.header.qdCount != 1) {
+		setverdict(fail, "the query carries ", p_query.header.qdCount,
+			   " questions rather than one");
+	}
+	if (p_query.header.anCount != 0 or p_query.header.nsCount != 0 or
+	    p_query.header.arCount != 0) {
+		setverdict(fail, "the query carries records in a section that " &
+			   "should be empty");
+	}
+	if (lengthof(p_query.queries) != 1) {
+		setverdict(fail, "the question section does not hold one question");
+		return;
+	}
+	if (p_query.queries[0].qName != tsp_query_name) {
+		setverdict(fail, "the query asks for ", p_query.queries[0].qName,
+			   " rather than ", tsp_query_name);
+	}
+	if (p_query.queries[0].qType != DNS_A) {
+		setverdict(fail, "the query asks for type ",
+			   p_query.queries[0].qType, " rather than A");
+	}
+	if (p_query.queries[0].qClass != DNS_IN) {
+		setverdict(fail, "the query asks in class ",
+			   p_query.queries[0].qClass, " rather than IN");
+	}
+}
+
+/* A query has to say what it is asking, for whom, and leave the sections it
+ * is not using empty. RFC 1035 4.1.
+ */
+testcase tc_query_is_well_formed() runs on DNS_MTC
+{
+	var QuerySeen v_query;
+
+	f_open();
+	v_query := f_await_query();
+	f_check_query_shape(v_query.pdu);
+
+	setverdict(pass);
+	f_close();
+}
+
+/* The identifier is what stops an off path attacker from answering a query it
+ * cannot see, so it has to be unpredictable rather than a counter or a
+ * constant. RFC 5452 9.1.
+ */
+testcase tc_query_id_varies() runs on DNS_MTC
+{
+	var QueriesSeen v_seen;
+	var integer v_repeats := 0;
+	var integer v_consecutive := 0;
+
+	f_open();
+	v_seen := f_await_queries(tsp_query_sample);
+
+	for (var integer i := 1; i < lengthof(v_seen); i := i + 1) {
+		if (v_seen[i].pdu.header.id == v_seen[i - 1].pdu.header.id) {
+			v_repeats := v_repeats + 1;
+		}
+		if (v_seen[i].pdu.header.id ==
+		    v_seen[i - 1].pdu.header.id + 1) {
+			v_consecutive := v_consecutive + 1;
+		}
+	}
+
+	if (v_repeats == lengthof(v_seen) - 1) {
+		setverdict(fail, "every query carries the same identifier");
+	} else if (v_consecutive == lengthof(v_seen) - 1) {
+		setverdict(fail, "the identifier counts up, so it is predictable");
+	} else {
+		setverdict(pass);
+	}
+
+	f_close();
+}
+
+/* A query that is never answered has to fail on its own and leave the
+ * resolver able to ask again. This is the case that wedges a resolver which
+ * loses track of a query slot.
+ */
+testcase tc_unanswered_query_does_not_wedge() runs on DNS_MTC
+{
+	var QuerySeen v_first;
+	var QuerySeen v_next;
+
+	f_open();
+	v_first := f_await_query();
+
+	/* Say nothing at all, and wait for the resolver to come back. */
+	v_next := f_await_query();
+	f_check_query_shape(v_next.pdu);
+
+	setverdict(pass);
+	f_close();
+}
+
+/* An answer has to be accepted without disturbing what follows. Asking again
+ * after one has been answered is what a resolver does when the answer has
+ * been used and released.
+ */
+testcase tc_answer_is_followed_by_more_queries() runs on DNS_MTC
+{
+	var QuerySeen v_query;
+	var QuerySeen v_next;
+
+	f_open();
+	v_query := f_await_query();
+	f_answer(v_query, tsp_sut_ipv4);
+
+	v_next := f_await_query();
+	f_check_query_shape(v_next.pdu);
+
+	if (v_next.pdu.header.id == v_query.pdu.header.id) {
+		setverdict(fail, "the query after an answered one reuses its identifier");
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/* A resolver reads whatever the network hands it, so a broken response has to
+ * be dropped rather than trusted. Feed it several kinds and require that the
+ * resolver is still asking properly afterwards.
+ */
+testcase tc_malformed_answers_are_survived() runs on DNS_MTC
+{
+	var QuerySeen v_query;
+	var QuerySeen v_next;
+
+	f_open();
+
+	/* Shorter than a header. */
+	v_query := f_await_query();
+	f_reply_raw(v_query, '00'O);
+
+	/* A header that promises records which are not there. */
+	v_query := f_await_query();
+	f_reply_raw(v_query, int2oct(v_query.pdu.header.id, 2) &
+			     '8180'O & '0001000500000000'O);
+
+	/* A name whose label length runs off the end of the message. */
+	v_query := f_await_query();
+	f_reply_raw(v_query, int2oct(v_query.pdu.header.id, 2) &
+			     '8180'O & '0001000000000000'O & '3f4142'O);
+
+	/* A compression pointer that points at itself. */
+	v_query := f_await_query();
+	f_reply_raw(v_query, int2oct(v_query.pdu.header.id, 2) &
+			     '8180'O & '0001000100000000'O & 'c00c'O);
+
+	/* Still alive and still asking properly. */
+	v_next := f_await_query();
+	f_check_query_shape(v_next.pdu);
+
+	setverdict(pass);
+	f_close();
+}
+
+/* An answer carrying somebody else's identifier is an answer to a question
+ * this resolver did not ask, and has to be ignored. If it were accepted, the
+ * resolver would be trivially poisonable.
+ */
+testcase tc_answer_with_wrong_id_is_ignored() runs on DNS_MTC
+{
+	var QuerySeen v_query;
+	var QuerySeen v_next;
+	var PDU_DNS v_forged;
+
+	f_open();
+	v_query := f_await_query();
+
+	v_forged := v_query.pdu;
+	v_forged.header.id := (v_query.pdu.header.id + 1) mod 65536;
+	v_forged.header.qr := DNS_RESPONSE;
+	v_forged.header.aa := true;
+	v_forged.header.ra := true;
+	v_forged.header.anCount := 1;
+	v_forged.answers := {
+		{
+			name := tsp_query_name,
+			rrType := DNS_A,
+			rrClass := DNS_IN,
+			ttl := int2oct(30, 4),
+			rdLength := 4,
+			rData := { a := f_convertIPAddrToBinary("198.51.100.1") }
+		}
+	};
+
+	f_reply_raw(v_query, enc_PDU_DNS(v_forged, false, true));
+
+	/* The resolver has to carry on as though nothing had arrived. */
+	v_next := f_await_query();
+	f_check_query_shape(v_next.pdu);
+
+	setverdict(pass);
+	f_close();
+}
+
+control {
+	execute(tc_query_is_well_formed());
+	execute(tc_query_id_varies());
+	execute(tc_unanswered_query_does_not_wedge());
+	execute(tc_answer_is_followed_by_more_queries());
+	execute(tc_malformed_answers_are_survived());
+	execute(tc_answer_with_wrong_id_is_ignored());
+}
+
+}
