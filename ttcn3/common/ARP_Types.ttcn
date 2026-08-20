@@ -11,6 +11,12 @@
  * that would have to be found first. Only the ethernet and IPv4 case is
  * described, which is the only case that occurs here: the lengths are fixed
  * rather than driving the field widths.
+ *
+ * This lives in the shared layer rather than in the suite that tests address
+ * resolution, because a suite working below IP has to answer it whether that
+ * is what it is testing or not. On a link with no address on the Linux side,
+ * nothing else will, and a system under test that cannot resolve the tester's
+ * address cannot send it anything.
  */
 module ARP_Types {
 
