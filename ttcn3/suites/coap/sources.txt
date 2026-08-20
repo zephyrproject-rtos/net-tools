@@ -1,0 +1,16 @@
+# Module sources this suite needs on top of common/sources.txt,
+# relative to ../../modules.
+#
+# The test cases are not written here: they are the ETSI derived CoAP suite
+# that the Titan project publishes in titan.misc. This suite contributes the
+# configuration that points it at Zephyr, and the list of cases that are
+# expected to pass.
+
+titan.ProtocolModules.CoAP/src/CoAP_Types.ttcn
+titan.ProtocolModules.CoAP/src/CoAP_EncDec.cc
+
+titan.misc/CoAP_Conf/src/CoapCommon.ttcn
+titan.misc/CoAP_Conf/src/CoapFramework.ttcn
+titan.misc/CoAP_Conf/src/CoapPeer.ttcn
+titan.misc/CoAP_Conf/src/CoapApplication.ttcn
+titan.misc/CoAP_Conf/src/CoapTestSuite_Etsi.ttcn

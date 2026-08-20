@@ -13,6 +13,7 @@ needed: the system under test is an ordinary sample application.
 |---|---|---|
 | `mdns` | `tests/net/conformance/mdns` | Name resolution over IPv4 and IPv6, record shape, silence for names the responder does not own |
 | `dns` | `tests/net/conformance/dns` | Query shape, identifier unpredictability, and what the resolver does with unanswered, forged and malformed answers |
+| `coap` | `tests/net/conformance/coap` | The ETSI derived CoAP core test cases, run against a server exposing /test |
 
 ## Getting a Titan
 
@@ -49,6 +50,15 @@ Then build and run the suite:
 ```
 ./build.sh mdns
 cd suites/mdns/build && ./mdns ../mdns.cfg
+```
+
+A suite whose test cases create parallel test components cannot be run as one
+process. Those say `MODE=parallel` in a `build.conf`, and are run through the
+main controller instead, which needs `expect` installed:
+
+```
+./build.sh coap
+cd suites/coap/build && ttcn3_start ./coap ../coap.cfg
 ```
 
 The last line of the output is the verdict:
@@ -104,12 +114,15 @@ To move a pin, change the commit in `modules.txt` and re-run
 ## Adding a suite
 
 1. Create `suites/<name>/` with the TTCN-3 source, a `sources.txt` naming the
-   module sources it needs, and a `<name>.cfg`.
+   module sources it needs, and a `<name>.cfg`. A suite that only runs test
+   cases from a third party module needs no source of its own; see `coap`.
 2. Take addresses and timeouts from `common/Zephyr_SUT.ttcn` rather than
    writing them into the suite.
 3. If the suite needs a module that is not in `modules.txt` yet, add it there
    with a pinned commit.
-4. Add a row to the table at the top of this file.
+4. If its test cases create parallel test components, add a `build.conf`
+   saying `MODE=parallel`.
+5. Add a row to the table at the top of this file.
 
 ## Building in the container
 
@@ -134,6 +147,11 @@ carry identifier zero, no question section, the cache flush bit set and the full
 TTL, where the RFC asks for the identifier echoed, the question repeated, the
 cache flush bit clear and the TTL capped at ten seconds. Answers to a real mDNS
 resolver, which queries from port 5353, are not affected.
+
+**CoAP.** Two of the ETSI cases the suite publishes, `TD_COAP_BLOCK_01` and
+`TD_COAP_OBS_01`, are not run. They address a `/large` and an `/obs` resource,
+and the system under test provides only `/test`. Adding those resources, and
+the two cases with them, is the obvious next step for this suite.
 
 **DNS, RFC 5452 9.2.** The resolver varies the query identifier, which the
 `dns` suite checks, but keeps one socket per server, so its source port is

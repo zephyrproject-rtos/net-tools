@@ -37,6 +37,20 @@ if [ ! -d "$suite_dir" ]; then
 	exit 1
 fi
 
+# Single mode by default: the executable is the whole test suite, and running
+# it needs neither a main controller nor expect. A suite whose test cases
+# create parallel test components cannot use it, and says so in build.conf.
+MODE=single
+if [ -f "$suite_dir/build.conf" ]; then
+	. "$suite_dir/build.conf"
+fi
+
+case "$MODE" in
+single)   mode_flag=-s ;;
+parallel) mode_flag= ;;
+*)        echo "unknown MODE '$MODE' in $suite_dir/build.conf" >&2; exit 1 ;;
+esac
+
 if [ -z "${TTCN3_DIR:-}" ]; then
 	echo "TTCN3_DIR is unset; point it at a Titan installation" >&2
 	exit 1
@@ -67,8 +81,12 @@ link_source()
 	ln -sf "$1" "$build_dir/$(basename "$1")"
 }
 
+# A suite that only runs test cases from a third party module has no sources
+# of its own, so an empty match here is not an error.
 for f in "$suite_dir"/*.ttcn "$here"/common/*.ttcn; do
-	link_source "$f"
+	if [ -f "$f" ]; then
+		link_source "$f"
+	fi
 done
 
 link_module_sources()
@@ -89,7 +107,7 @@ cd "$build_dir"
 names=$(ls ./*.ttcn ./*.cc ./*.hh 2>/dev/null | sed 's#^\./##')
 
 # shellcheck disable=SC2086
-"$TTCN3_DIR/bin/ttcn3_makefilegen" -g -s -f -e "$suite" $names
+"$TTCN3_DIR/bin/ttcn3_makefilegen" -g $mode_flag -f -e "$suite" $names
 
 make CPPFLAGS="-D\$(PLATFORM) -I. -I$titan_inc" \
      LDFLAGS="-L$titan_lib" \
