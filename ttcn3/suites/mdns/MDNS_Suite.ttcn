@@ -36,6 +36,7 @@ import from IPL4asp_Types all;
 import from IPL4asp_PortType all;
 import from TCCConversion_Functions all;
 import from Zephyr_SUT all;
+import from Zephyr_Transport all;
 
 /* The responder answers with this TTL, RFC 6762 10 recommends it for records
  * that contain a host name.
@@ -60,11 +61,7 @@ function f_mdns_group_v6() return charstring
 	return c_mdns_group_v6 & "%" & tsp_tester_interface;
 }
 
-type component MDNS_MTC {
-	port IPL4asp_PT pt;
-	var ConnectionId v_connId := -1;
-	timer t_guard;
-}
+type component MDNS_MTC extends Zephyr_Tester {}
 
 /* A query for one name and one type, as a resolver on the link would send it. */
 template PDU_DNS ts_query(charstring p_name, RRType p_type) := {
@@ -89,44 +86,20 @@ template PDU_DNS ts_query(charstring p_name, RRType p_type) := {
 	additionalRecords := {}
 }
 
-/* Open an unconnected socket on the tester. It has to stay unconnected: the
- * query goes to the group address but the answer comes from the address of
- * the system under test, and a connected socket would discard it.
+/* The tester's port has to be an ephemeral one rather than 5353, so that the
+ * responder treats the query as a legacy unicast one and answers the tester
+ * alone. f_udp_listen defaults to that.
  */
 function f_open(in charstring p_local_addr) runs on MDNS_MTC
 {
-	var Result v_res;
-
-	map(mtc:pt, system:pt);
-
-	v_res := f_IPL4_listen(pt, p_local_addr, 0, { udp := {} });
-	if (not ispresent(v_res.connId)) {
-		setverdict(fail, "cannot open a socket on ", p_local_addr);
-		stop;
-	}
-
-	v_connId := v_res.connId;
-}
-
-function f_close() runs on MDNS_MTC
-{
-	if (v_connId != -1) {
-		f_IPL4_close(pt, v_connId);
-		v_connId := -1;
-	}
-	unmap(mtc:pt, system:pt);
+	f_udp_listen(p_local_addr);
 }
 
 function f_send_query(in charstring p_group, in charstring p_name, in RRType p_type)
 runs on MDNS_MTC
 {
-	pt.send(ASP_SendTo:{
-		connId := v_connId,
-		remName := p_group,
-		remPort := c_mdns_port,
-		proto := omit,
-		msg := enc_PDU_DNS(valueof(ts_query(p_name, p_type)), false, true)
-	});
+	f_send_to(p_group, c_mdns_port,
+		  enc_PDU_DNS(valueof(ts_query(p_name, p_type)), false, true));
 }
 
 /* Wait for one answer and hand back the decoded message. Fails the test case
@@ -134,18 +107,7 @@ runs on MDNS_MTC
  */
 function f_await_response() runs on MDNS_MTC return PDU_DNS
 {
-	var ASP_RecvFrom v_recv;
-
-	t_guard.start(tsp_response_timeout);
-	alt {
-	[] pt.receive(ASP_RecvFrom:?) -> value v_recv {
-		t_guard.stop;
-	}
-	[] t_guard.timeout {
-		setverdict(fail, "no answer within ", tsp_response_timeout, "s");
-		stop;
-	}
-	}
+	var ASP_RecvFrom v_recv := f_receive();
 
 	if (v_recv.remName != tsp_sut_ipv4 and v_recv.remName != tsp_sut_ipv6) {
 		setverdict(fail, "answer came from ", v_recv.remName,
@@ -153,25 +115,6 @@ function f_await_response() runs on MDNS_MTC return PDU_DNS
 	}
 
 	return dec_PDU_DNS(v_recv.msg);
-}
-
-/* Require that no answer arrives. Used where the responder is supposed to stay
- * quiet, which for mDNS is how a name it does not own is refused.
- */
-function f_await_silence() runs on MDNS_MTC
-{
-	var ASP_RecvFrom v_recv;
-
-	t_guard.start(tsp_silence_timeout);
-	alt {
-	[] pt.receive(ASP_RecvFrom:?) -> value v_recv {
-		t_guard.stop;
-		setverdict(fail, "answered a query it should have ignored");
-	}
-	[] t_guard.timeout {
-		setverdict(pass);
-	}
-	}
 }
 
 /* Every answer carries the queried name, the queried type, the cache flush
@@ -350,7 +293,7 @@ testcase tc_unknown_name_is_ignored() runs on MDNS_MTC
 {
 	f_open(tsp_tester_ipv4);
 	f_send_query(c_mdns_group_v4, "nosuchhost.local", DNS_A);
-	f_await_silence();
+	f_expect_silence("a name it does not own");
 	f_close();
 }
 
@@ -362,7 +305,7 @@ testcase tc_unknown_type_is_ignored() runs on MDNS_MTC
 {
 	f_open(tsp_tester_ipv4);
 	f_send_query(c_mdns_group_v4, f_local_name(), DNS_MX);
-	f_await_silence();
+	f_expect_silence("a type it has no record of");
 	f_close();
 }
 

@@ -71,12 +71,18 @@ for f in "$suite_dir"/*.ttcn "$here"/common/*.ttcn; do
 	link_source "$f"
 done
 
-while read -r path; do
-	case "$path" in
-	''|\#*) continue ;;
-	esac
-	link_source "$here/modules/$path"
-done < "$suite_dir/sources.txt"
+link_module_sources()
+{
+	while read -r path; do
+		case "$path" in
+		''|\#*) continue ;;
+		esac
+		link_source "$here/modules/$path"
+	done < "$1"
+}
+
+link_module_sources "$here/common/sources.txt"
+link_module_sources "$suite_dir/sources.txt"
 
 cd "$build_dir"
 

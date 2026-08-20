@@ -1,22 +1,5 @@
-# Module sources this suite builds against, relative to ../../modules.
-# One path per line; build.sh passes them to the makefile generator.
+# Module sources this suite needs on top of common/sources.txt,
+# relative to ../../modules.
 
 titan.ProtocolModules.DNS/src/DNS_Types.ttcn
 titan.ProtocolModules.DNS/src/DNS_EncDec.cc
-
-titan.TestPorts.IPL4asp/src/IPL4asp_Types.ttcn
-titan.TestPorts.IPL4asp/src/IPL4asp_PortType.ttcn
-titan.TestPorts.IPL4asp/src/IPL4asp_Functions.ttcn
-titan.TestPorts.IPL4asp/src/IPL4asp_PT.cc
-titan.TestPorts.IPL4asp/src/IPL4asp_PT.hh
-titan.TestPorts.IPL4asp/src/IPL4asp_discovery.cc
-titan.TestPorts.IPL4asp/src/IPL4asp_protocol_L234.hh
-
-titan.TestPorts.Common_Components.Socket-API/src/Socket_API_Definitions.ttcn
-titan.TestPorts.Common_Components.Abstract_Socket/src/Abstract_Socket.cc
-titan.TestPorts.Common_Components.Abstract_Socket/src/Abstract_Socket.hh
-
-titan.Libraries.TCCUsefulFunctions/src/TCCConversion_Functions.ttcn
-titan.Libraries.TCCUsefulFunctions/src/TCCConversion.cc
-titan.Libraries.TCCUsefulFunctions/src/TCCInterface_Functions.ttcn
-titan.Libraries.TCCUsefulFunctions/src/TCCInterface.cc

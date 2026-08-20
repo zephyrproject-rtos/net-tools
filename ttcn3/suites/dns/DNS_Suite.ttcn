@@ -32,6 +32,7 @@ import from IPL4asp_Types all;
 import from IPL4asp_PortType all;
 import from TCCConversion_Functions all;
 import from Zephyr_SUT all;
+import from Zephyr_Transport all;
 
 /* Where the tester listens. Not port 53: this needs no privileges, and it
  * cannot collide with a resolver already running on the host.
@@ -44,11 +45,7 @@ modulepar charstring tsp_query_name := "conformance.test";
 /* How many queries the tests that look at several of them collect. */
 modulepar integer tsp_query_sample := 5;
 
-type component DNS_MTC {
-	port IPL4asp_PT pt;
-	var ConnectionId v_connId := -1;
-	timer t_guard;
-}
+type component DNS_MTC extends Zephyr_Tester {}
 
 /* What a query looked like, kept apart from the message itself so that a test
  * can talk about where it came from.
@@ -63,26 +60,7 @@ type record of QuerySeen QueriesSeen;
 
 function f_open() runs on DNS_MTC
 {
-	var Result v_res;
-
-	map(mtc:pt, system:pt);
-
-	v_res := f_IPL4_listen(pt, tsp_tester_ipv4, tsp_dns_port, { udp := {} });
-	if (not ispresent(v_res.connId)) {
-		setverdict(fail, "cannot listen on ", tsp_tester_ipv4, ":", tsp_dns_port);
-		stop;
-	}
-
-	v_connId := v_res.connId;
-}
-
-function f_close() runs on DNS_MTC
-{
-	if (v_connId != -1) {
-		f_IPL4_close(pt, v_connId);
-		v_connId := -1;
-	}
-	unmap(mtc:pt, system:pt);
+	f_udp_listen(tsp_tester_ipv4, tsp_dns_port);
 }
 
 /* Wait for the next query. Fails the test case and stops it if the resolver
@@ -90,18 +68,7 @@ function f_close() runs on DNS_MTC
  */
 function f_await_query() runs on DNS_MTC return QuerySeen
 {
-	var ASP_RecvFrom v_recv;
-
-	t_guard.start(tsp_response_timeout);
-	alt {
-	[] pt.receive(ASP_RecvFrom:?) -> value v_recv {
-		t_guard.stop;
-	}
-	[] t_guard.timeout {
-		setverdict(fail, "no query within ", tsp_response_timeout, "s");
-		stop;
-	}
-	}
+	var ASP_RecvFrom v_recv := f_receive();
 
 	return { pdu := dec_PDU_DNS(v_recv.msg),
 		 fromAddr := v_recv.remName,
@@ -124,13 +91,7 @@ function f_await_queries(in integer p_count) runs on DNS_MTC return QueriesSeen
  */
 function f_reply_raw(in QuerySeen p_query, in octetstring p_msg) runs on DNS_MTC
 {
-	pt.send(ASP_SendTo:{
-		connId := v_connId,
-		remName := p_query.fromAddr,
-		remPort := p_query.fromPort,
-		proto := omit,
-		msg := p_msg
-	});
+	f_send_to(p_query.fromAddr, p_query.fromPort, p_msg);
 }
 
 /* A correct answer to p_query, carrying one A record for the queried name. */

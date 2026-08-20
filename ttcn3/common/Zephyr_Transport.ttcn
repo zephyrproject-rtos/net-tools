@@ -1,0 +1,128 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* The part of a suite that is the same whatever protocol is being tested: a
+ * socket on the tester, and the handful of things every suite does with it.
+ *
+ * A suite extends Zephyr_Tester rather than declaring its own component, so
+ * that the functions here are available to it:
+ *
+ *     type component MY_MTC extends Zephyr_Tester { ... }
+ *
+ * Timeouts come from Zephyr_SUT, so that one configuration file can slow a
+ * whole run down for a loaded machine without touching any suite.
+ */
+module Zephyr_Transport {
+
+import from IPL4asp_Types all;
+import from IPL4asp_PortType all;
+import from Zephyr_SUT all;
+
+type component Zephyr_Tester {
+	port IPL4asp_PT pt;
+	var ConnectionId v_connId := -1;
+	timer t_guard;
+}
+
+/* Open an unconnected UDP socket on the tester.
+ *
+ * Unconnected is the point. A connected socket only accepts datagrams from
+ * the address it was connected to, which is wrong for anything that answers
+ * from an address other than the one it was asked at, and wrong for anything
+ * addressed to a group.
+ *
+ * A local port of zero asks the system for a free one.
+ */
+function f_udp_listen(in charstring p_local_addr, in integer p_local_port := 0)
+runs on Zephyr_Tester
+{
+	var Result v_res;
+
+	map(mtc:pt, system:pt);
+
+	v_res := f_IPL4_listen(pt, p_local_addr, p_local_port, { udp := {} });
+	if (not ispresent(v_res.connId)) {
+		setverdict(fail, "cannot open a socket on ", p_local_addr, ":", p_local_port);
+		stop;
+	}
+
+	v_connId := v_res.connId;
+}
+
+function f_close() runs on Zephyr_Tester
+{
+	if (v_connId != -1) {
+		f_IPL4_close(pt, v_connId);
+		v_connId := -1;
+	}
+
+	unmap(mtc:pt, system:pt);
+}
+
+function f_send_to(in charstring p_addr, in integer p_port, in octetstring p_msg)
+runs on Zephyr_Tester
+{
+	pt.send(ASP_SendTo:{
+		connId := v_connId,
+		remName := p_addr,
+		remPort := p_port,
+		proto := omit,
+		msg := p_msg
+	});
+}
+
+/* Wait for one datagram. Fails the test case and stops it if nothing arrives,
+ * so that callers can use the result without checking it first.
+ */
+function f_receive(in float p_timeout := -1.0) runs on Zephyr_Tester return ASP_RecvFrom
+{
+	var ASP_RecvFrom v_recv;
+	var float v_timeout := p_timeout;
+
+	if (v_timeout < 0.0) {
+		v_timeout := tsp_response_timeout;
+	}
+
+	t_guard.start(v_timeout);
+	alt {
+	[] pt.receive(ASP_RecvFrom:?) -> value v_recv {
+		t_guard.stop;
+	}
+	[] t_guard.timeout {
+		setverdict(fail, "nothing arrived within ", v_timeout, "s");
+		stop;
+	}
+	}
+
+	return v_recv;
+}
+
+/* Require that nothing arrives. Staying quiet is a real answer in several
+ * protocols, so it needs checking as carefully as a reply does.
+ */
+function f_expect_silence(in charstring p_why, in float p_timeout := -1.0)
+runs on Zephyr_Tester
+{
+	var ASP_RecvFrom v_recv;
+	var float v_timeout := p_timeout;
+
+	if (v_timeout < 0.0) {
+		v_timeout := tsp_silence_timeout;
+	}
+
+	t_guard.start(v_timeout);
+	alt {
+	[] pt.receive(ASP_RecvFrom:?) -> value v_recv {
+		t_guard.stop;
+		setverdict(fail, "answered when it should have stayed quiet: ", p_why);
+	}
+	[] t_guard.timeout {
+		setverdict(pass);
+	}
+	}
+}
+
+}
