@@ -15,6 +15,7 @@ needed: the system under test is an ordinary sample application.
 | `dns` | `tests/net/conformance/dns` | Query shape, identifier unpredictability, and what the resolver does with unanswered, forged and malformed answers |
 | `coap` | `tests/net/conformance/coap` | The ETSI derived CoAP core test cases, run against a server exposing /test |
 | `dhcpv4` | `tests/net/conformance/dhcpv4` | Discover shape, retransmission, and the offer, request and acknowledge exchange |
+| `arp` | `tests/net/conformance/arp` | Answering for its own address, staying quiet about others, and asking before it sends |
 
 ## Getting a Titan
 
@@ -53,9 +54,20 @@ Then build and run the suite:
 cd suites/mdns/build && ./mdns ../mdns.cfg
 ```
 
-A suite that has to bind a privileged port says `PRIVILEGED=yes` in its
-`build.conf` and has to be run as root. Only `dhcpv4` does: DHCP is defined on
-ports 67 and 68 and there is no way to move it.
+A suite that has to bind a privileged port, or read frames off the link, says
+`PRIVILEGED=yes` in its `build.conf` and has to be run as root. `dhcpv4` does
+because DHCP is defined on ports 67 and 68 and there is no way to move it;
+`arp` does because reading frames needs a packet socket.
+
+A suite that works below the IP layer also says `L2=yes`, and uses a second
+interface described by `../zeth-l2.conf`. That interface is given no IP
+address on purpose. Linux answers address resolution and neighbour discovery
+for any address it holds on any interface unless told otherwise, and an answer
+from the host would be indistinguishable from an answer from Zephyr:
+
+```
+sudo ../net-setup.sh --config ../zeth-l2.conf --iface zethL2 start
+```
 
 A suite whose test cases create parallel test components cannot be run as one
 process. Those say `MODE=parallel` in a `build.conf`, and are run through the
@@ -86,7 +98,7 @@ different link without touching the suite.
 ## Layout
 
 ```
-common/          TTCN-3 shared by every suite
+common/          TTCN-3 shared by every suite, and the ethernet test port
 modules/         third party modules, cloned by fetch-modules.sh, not in git
 modules.txt      which third party modules, and at which commit
 fetch-modules.sh clones them
@@ -107,6 +119,13 @@ project, which are separate repositories under
 `https://gitlab.eclipse.org/eclipse/titan/`. They are not vendored here; they
 are cloned on demand and pinned by commit so that a suite which passes today
 still builds tomorrow.
+
+One test port is written here rather than taken from them. The Titan project
+publishes `LANL2asp` for reading and writing ethernet frames, but it captures
+with libpcap and opens the handle with a zero read timeout, which on Linux
+asks the kernel to wait indefinitely for a capture block to fill. On a link as
+quiet as a test link the frames never reach the test, and there is no parameter
+to change it. `common/Ethernet_PT.cc` reads a packet socket instead.
 
 They are distributed under the Eclipse Public License 2.0, whereas everything
 written here is Apache 2.0. Both are approved by the Open Source Initiative,

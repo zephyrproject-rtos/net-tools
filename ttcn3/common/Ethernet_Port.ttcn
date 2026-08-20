@@ -1,0 +1,41 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* A port that reads and writes ethernet frames on an interface.
+ *
+ * The Titan project publishes a test port for this, LANL2asp, but it captures
+ * with libpcap and opens the handle with a zero read timeout. On Linux that
+ * asks the kernel to wait indefinitely for a capture block to fill, so on a
+ * link as quiet as a test link the frames never reach the test. There is no
+ * parameter to change it, so this port reads a packet socket instead, which
+ * hands every frame up as it arrives.
+ *
+ * Test port parameters:
+ *
+ *   interface        name of the interface to read and write, required
+ *   source_address   hardware address to send from, twelve hexadecimal
+ *                    digits; defaults to the interface's own
+ *   ethertype        when set, only frames of this type are handed up, as
+ *                    four hexadecimal digits
+ *
+ * The port needs to be run with enough privilege to open a packet socket.
+ */
+module Ethernet_Port {
+
+import from General_Types all;
+
+type record Ethernet_Frame {
+	OCT6 destination,
+	OCT6 source,
+	OCT2 etherType,
+	octetstring payload
+}
+
+type port Ethernet_PT message {
+	inout Ethernet_Frame;
+}
+
+}

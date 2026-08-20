@@ -1,0 +1,7 @@
+# Module sources this suite needs on top of common/sources.txt,
+# relative to ../../modules.
+#
+# The ethernet port this suite reads and writes frames with is written here,
+# in common/, rather than taken from the Titan project. See Ethernet_Port.ttcn
+# for why.
+

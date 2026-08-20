@@ -1,0 +1,41 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Address resolution packets, RFC 826.
+ *
+ * The Titan project publishes no protocol module for this one, and the packet
+ * is small enough that writing it out is easier than depending on something
+ * that would have to be found first. Only the ethernet and IPv4 case is
+ * described, which is the only case that occurs here: the lengths are fixed
+ * rather than driving the field widths.
+ */
+module ARP_Types {
+
+import from General_Types all;
+
+type record ARP_Packet {
+	OCT2 hwType,
+	OCT2 protoType,
+	INT1 hwLen,
+	INT1 protoLen,
+	OCT2 operation,
+	OCT6 senderHwAddr,
+	OCT4 senderProtoAddr,
+	OCT6 targetHwAddr,
+	OCT4 targetProtoAddr
+}
+
+const OCT2 c_arp_hw_ethernet := '0001'O;
+const OCT2 c_arp_proto_ipv4 := '0800'O;
+const OCT2 c_arp_request := '0001'O;
+const OCT2 c_arp_reply := '0002'O;
+
+const OCT2 c_ethertype_arp := '0806'O;
+
+const OCT6 c_mac_broadcast := 'FFFFFFFFFFFF'O;
+const OCT6 c_mac_unspecified := '000000000000'O;
+
+} with { encode "RAW" }
