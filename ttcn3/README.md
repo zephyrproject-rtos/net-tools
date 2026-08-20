@@ -181,20 +181,23 @@ Where a suite asserts behaviour that does not match the RFC, the assertion says
 so at the point it is made, so that the divergence is recorded rather than
 frozen in silently.
 
-**mDNS, RFC 6762 6.7.** The responder does not distinguish a legacy unicast
-query, which is what a query from a port other than 5353 is. Its answers to one
-carry identifier zero, no question section, the cache flush bit set and the full
-TTL, where the RFC asks for the identifier echoed, the question repeated, the
-cache flush bit clear and the TTL capped at ten seconds. Answers to a real mDNS
-resolver, which queries from port 5353, are not affected.
+Two findings that were recorded here have since been fixed and are now
+asserted by the suites instead: the mDNS responder answers a legacy unicast
+query conventionally, and the DNS resolver renews its source port.
+
+**mDNS DNS-SD, RFC 6762 6.7.** The hostname side of the responder answers a
+legacy unicast query the way the RFC asks. The DNS-SD side does not: it builds
+its messages in `dns_sd.c`, which still sets the cache flush bit, uses its own
+long TTLs and echoes neither the identifier nor the question. Doing the same
+there means reworking the compression offsets those encoders compute from a
+fixed header size. No suite covers it yet either.
 
 **CoAP.** Two of the ETSI cases the suite publishes, `TD_COAP_BLOCK_01` and
 `TD_COAP_OBS_01`, are not run. They address a `/large` and an `/obs` resource,
 and the system under test provides only `/test`. Adding those resources, and
 the two cases with them, is the obvious next step for this suite.
 
-**DNS, RFC 5452 9.2.** The resolver varies the query identifier, which the
-`dns` suite checks, but keeps one socket per server, so its source port is
-fixed for as long as it runs. The RFC asks for both to vary, because the two
-together are what an off path attacker has to guess. There is no test case for
-this: one that asserted the current behaviour would fail the day it improved.
+**DNS, RFC 5452 9.2.** The resolver renews its source port before a query to a
+server with nothing outstanding, which with the default of one query at a time
+means every query. Queries that overlap on one server still share a port, so
+the `dns` suite's check would not catch a regression in that case.

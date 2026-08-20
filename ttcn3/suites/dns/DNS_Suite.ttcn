@@ -16,13 +16,6 @@
  * device and the next one follows, which is why the tests below talk about the
  * next query rather than a retry.
  *
- * One thing is deliberately not tested. RFC 5452 9.2 asks a resolver to vary
- * the source port between queries as well as the identifier, because the two
- * together are what an off path attacker has to guess. The resolver keeps one
- * socket per server, so its source port is fixed for as long as it runs. That
- * is worth knowing, but a test that asserted it would fail the day it was
- * improved, so it is recorded here rather than frozen into a test case.
- *
  * The system under test is tests/net/conformance/dns in the Zephyr tree.
  */
 module DNS_Suite {
@@ -223,6 +216,40 @@ testcase tc_query_id_varies() runs on DNS_MTC
 	f_close();
 }
 
+/* An off path attacker forging an answer has to guess the identifier and the
+ * source port together, so both have to move. A port that never changes is
+ * learned from any single query and is then no longer a guess. RFC 5452 9.2.
+ */
+testcase tc_query_source_port_varies() runs on DNS_MTC
+{
+	var QueriesSeen v_seen;
+	var integer v_repeats := 0;
+	var integer v_consecutive := 0;
+
+	f_open();
+	v_seen := f_await_queries(tsp_query_sample);
+
+	for (var integer i := 1; i < lengthof(v_seen); i := i + 1) {
+		if (v_seen[i].fromPort == v_seen[i - 1].fromPort) {
+			v_repeats := v_repeats + 1;
+		}
+		if (v_seen[i].fromPort == v_seen[i - 1].fromPort + 1) {
+			v_consecutive := v_consecutive + 1;
+		}
+	}
+
+	if (v_repeats == lengthof(v_seen) - 1) {
+		setverdict(fail, "every query leaves from the same port, so only "&
+			   "the identifier has to be guessed");
+	} else if (v_consecutive == lengthof(v_seen) - 1) {
+		setverdict(fail, "the source port counts up, so it is predictable");
+	} else {
+		setverdict(pass);
+	}
+
+	f_close();
+}
+
 /* A query that is never answered has to fail on its own and leave the
  * resolver able to ask again. This is the case that wedges a resolver which
  * loses track of a query slot.
@@ -348,6 +375,7 @@ testcase tc_answer_with_wrong_id_is_ignored() runs on DNS_MTC
 control {
 	execute(tc_query_is_well_formed());
 	execute(tc_query_id_varies());
+	execute(tc_query_source_port_varies());
 	execute(tc_unanswered_query_does_not_wedge());
 	execute(tc_answer_is_followed_by_more_queries());
 	execute(tc_malformed_answers_are_survived());
