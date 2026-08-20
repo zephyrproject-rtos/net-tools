@@ -1,0 +1,331 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Conformance tests for Zephyr's address resolution, RFC 826.
+ *
+ * This is the first suite to work below the IP layer, so it does not use the
+ * socket test port the others do. It reads and writes ethernet frames on the
+ * link directly, which needs privilege and a link where nothing else answers.
+ *
+ * That second part is why the system under test has an interface of its own.
+ * Linux answers address resolution for any address it holds on any interface
+ * unless told otherwise, and an answer from the host would be indistinguishable
+ * from an answer from Zephyr. The interface described in net-tools/zeth-l2.conf
+ * has no address at all and is told to answer for none, so everything on the
+ * link that is not the system under test is this suite.
+ *
+ * The system under test is tests/net/conformance/arp in the Zephyr tree.
+ */
+module ARP_Suite {
+
+import from General_Types all;
+import from ARP_Types all;
+import from Ethernet_Port all;
+import from TCCConversion_Functions all;
+import from Zephyr_SUT all;
+
+/* The hardware address the tester answers to, as twelve hexadecimal digits.
+ * The address is locally administered, so it cannot collide with a real one.
+ * It has to agree with eth_mac_source in the test port parameters, which is
+ * what the port puts in the frames it sends.
+ */
+modulepar charstring tsp_tester_mac := "020000000002";
+
+/* An address on the link that nothing owns, for asking about something the
+ * system under test should not answer for.
+ */
+modulepar charstring tsp_unclaimed_ipv4 := "192.0.2.77";
+
+type component ARP_MTC {
+	port Ethernet_PT pt;
+	timer t_guard;
+}
+
+function f_mac(in charstring p_mac) return OCT6
+{
+	return str2oct(p_mac);
+}
+
+function f_ipv4(in charstring p_addr) return OCT4
+{
+	return f_convertIPAddrToBinary(p_addr);
+}
+
+/* Mapping the port opens the interface, using the name, the hardware address
+ * and the type to filter on that are given in the test port parameters. The
+ * interface is named there rather than in a module parameter because the port
+ * reads it for itself before any test code runs.
+ *
+ * The filter matters. Without one the port hands up every frame on the link,
+ * and the datagrams the system under test sends would have to be skipped past
+ * in every test.
+ */
+function f_open() runs on ARP_MTC
+{
+	map(mtc:pt, system:pt);
+}
+
+function f_close() runs on ARP_MTC
+{
+	unmap(mtc:pt, system:pt);
+}
+
+function f_send_arp(in OCT6 p_eth_dst, in ARP_Packet p_arp) runs on ARP_MTC
+{
+	pt.send(Ethernet_Frame:{
+		destination := p_eth_dst,
+		source := f_mac(tsp_tester_mac),
+		etherType := c_ethertype_arp,
+		payload := bit2oct(encvalue(p_arp))
+	});
+}
+
+/* A request as a host on the link would send it: broadcast, asking who holds
+ * p_target and saying who is asking.
+ */
+function f_request(in charstring p_target, in OCT6 p_eth_dst := c_mac_broadcast)
+runs on ARP_MTC
+{
+	f_send_arp(p_eth_dst, {
+		hwType := c_arp_hw_ethernet,
+		protoType := c_arp_proto_ipv4,
+		hwLen := 6,
+		protoLen := 4,
+		operation := c_arp_request,
+		senderHwAddr := f_mac(tsp_tester_mac),
+		senderProtoAddr := f_ipv4(tsp_tester_ipv4),
+		targetHwAddr := c_mac_unspecified,
+		targetProtoAddr := f_ipv4(p_target)
+	});
+}
+
+/* Wait for the next address resolution frame from the system under test and
+ * hand back what it said. Fails the test case and stops it if nothing arrives.
+ */
+function f_await_arp() runs on ARP_MTC return ARP_Packet
+{
+	var Ethernet_Frame v_frame;
+	var bitstring v_bits;
+	var ARP_Packet v_arp;
+
+	t_guard.start(tsp_response_timeout);
+	alt {
+	[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+		t_guard.stop;
+	}
+	[] t_guard.timeout {
+		setverdict(fail, "nothing arrived within ", tsp_response_timeout, "s");
+		stop;
+	}
+	}
+
+	if (v_frame.etherType != c_ethertype_arp) {
+		setverdict(fail, "the filter let through something that is not "&
+			   "address resolution");
+		stop;
+	}
+
+	v_bits := oct2bit(v_frame.payload);
+	if (decvalue(v_bits, v_arp) != 0) {
+		setverdict(fail, "cannot decode the address resolution packet");
+		stop;
+	}
+
+	return v_arp;
+}
+
+/* Wait for a reply, skipping past requests. The system under test asks for the
+ * tester's address of its own accord, so a request can arrive at any time and
+ * is not what a test waiting for an answer is looking for.
+ */
+function f_await_reply() runs on ARP_MTC return ARP_Packet
+{
+	for (var integer i := 0; i < 8; i := i + 1) {
+		var ARP_Packet v_arp := f_await_arp();
+
+		if (v_arp.operation == c_arp_reply) {
+			return v_arp;
+		}
+	}
+
+	setverdict(fail, "no reply among the frames that arrived");
+	stop;
+}
+
+/* Require that no reply arrives. Requests are ignored, for the same reason. */
+function f_expect_no_reply(in charstring p_why) runs on ARP_MTC
+{
+	var Ethernet_Frame v_frame;
+	var bitstring v_bits;
+	var ARP_Packet v_arp;
+
+	t_guard.start(tsp_silence_timeout);
+	alt {
+	[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+		v_bits := oct2bit(v_frame.payload);
+		if (decvalue(v_bits, v_arp) == 0 and v_arp.operation == c_arp_reply) {
+			t_guard.stop;
+			setverdict(fail, "answered when it should not have: ", p_why);
+		} else {
+			repeat;
+		}
+	}
+	[] t_guard.timeout {
+		setverdict(pass);
+	}
+	}
+}
+
+function f_check_reply_shape(in ARP_Packet p_arp) runs on ARP_MTC
+{
+	if (p_arp.hwType != c_arp_hw_ethernet) {
+		setverdict(fail, "the hardware type is ", p_arp.hwType, " rather than ethernet");
+	}
+	if (p_arp.protoType != c_arp_proto_ipv4) {
+		setverdict(fail, "the protocol type is ", p_arp.protoType, " rather than IPv4");
+	}
+	if (p_arp.hwLen != 6 or p_arp.protoLen != 4) {
+		setverdict(fail, "the address lengths are ", p_arp.hwLen, " and ",
+			   p_arp.protoLen, " rather than 6 and 4");
+	}
+	if (p_arp.senderProtoAddr != f_ipv4(tsp_sut_ipv4)) {
+		setverdict(fail, "the reply is sent on behalf of somebody else");
+	}
+	if (p_arp.targetProtoAddr != f_ipv4(tsp_tester_ipv4)) {
+		setverdict(fail, "the reply is not addressed back to the asker");
+	}
+	if (p_arp.targetHwAddr != f_mac(tsp_tester_mac)) {
+		setverdict(fail, "the reply does not carry the asker's hardware address");
+	}
+}
+
+/* Asking who holds the address the system under test owns has to bring back a
+ * reply saying that it does. RFC 826.
+ */
+testcase tc_request_is_answered() runs on ARP_MTC
+{
+	var ARP_Packet v_reply;
+
+	f_open();
+	f_request(tsp_sut_ipv4);
+	v_reply := f_await_reply();
+	f_check_reply_shape(v_reply);
+
+	setverdict(pass);
+	f_close();
+}
+
+/* A host answers only for addresses it holds. Answering for one it does not
+ * would send traffic meant for another host to it instead.
+ */
+testcase tc_request_for_another_address_is_ignored() runs on ARP_MTC
+{
+	f_open();
+	f_request(tsp_unclaimed_ipv4);
+	f_expect_no_reply("the address asked about is not one it holds");
+	f_close();
+}
+
+/* A reply is an answer, not a question, so it calls for nothing in return. A
+ * host that answers one can be made to flood a link by a single frame.
+ */
+testcase tc_reply_is_not_answered() runs on ARP_MTC
+{
+	f_open();
+
+	f_send_arp(f_mac(tsp_tester_mac), {
+		hwType := c_arp_hw_ethernet,
+		protoType := c_arp_proto_ipv4,
+		hwLen := 6,
+		protoLen := 4,
+		operation := c_arp_reply,
+		senderHwAddr := f_mac(tsp_tester_mac),
+		senderProtoAddr := f_ipv4(tsp_tester_ipv4),
+		targetHwAddr := c_mac_unspecified,
+		targetProtoAddr := f_ipv4(tsp_sut_ipv4)
+	});
+
+	f_expect_no_reply("a reply was sent, which asks for nothing");
+	f_close();
+}
+
+/* A request sent to the hardware address of the system under test rather than
+ * to everybody still has to be answered. RFC 826 says nothing about how a
+ * request was addressed, and a host that had been asked directly and stayed
+ * quiet would be unreachable to anything that remembered its address.
+ */
+testcase tc_unicast_request_is_answered() runs on ARP_MTC
+{
+	var ARP_Packet v_first;
+	var ARP_Packet v_reply;
+
+	f_open();
+
+	/* Learn the hardware address from an answer rather than from the
+	 * configuration, and rather than from a request it sends of its own
+	 * accord: by this point it has an entry for the tester and has stopped
+	 * asking.
+	 */
+	f_request(tsp_sut_ipv4);
+	v_first := f_await_reply();
+	f_check_reply_shape(v_first);
+
+	f_request(tsp_sut_ipv4, v_first.senderHwAddr);
+	v_reply := f_await_reply();
+	f_check_reply_shape(v_reply);
+
+	if (v_reply.senderHwAddr != v_first.senderHwAddr) {
+		setverdict(fail, "it answered a request addressed to it with a "&
+			   "different hardware address than it answered a "&
+			   "broadcast one with");
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/* Before sending to an address on the link that it has no entry for, a host
+ * has to ask for it. One that sent to a made up hardware address instead would
+ * have its traffic dropped by the switch.
+ */
+testcase tc_it_asks_before_it_sends() runs on ARP_MTC
+{
+	var ARP_Packet v_request;
+
+	f_open();
+
+	v_request := f_await_arp();
+	if (v_request.operation != c_arp_request) {
+		setverdict(fail, "expected it to ask for the address it sends to");
+		f_close();
+		stop;
+	}
+
+	if (v_request.targetProtoAddr != f_ipv4(tsp_tester_ipv4)) {
+		setverdict(fail, "it asked about somebody other than the host "&
+			   "it is sending to");
+	}
+	if (v_request.senderProtoAddr != f_ipv4(tsp_sut_ipv4)) {
+		setverdict(fail, "it asked without saying who is asking, so the "&
+			   "answer has nowhere to go");
+	}
+	if (v_request.targetHwAddr != c_mac_unspecified) {
+		setverdict(fail, "it filled in the hardware address it is asking for");
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+control {
+	execute(tc_it_asks_before_it_sends());
+	execute(tc_request_is_answered());
+	execute(tc_unicast_request_is_answered());
+	execute(tc_request_for_another_address_is_ignored());
+	execute(tc_reply_is_not_answered());
+}
+
+}

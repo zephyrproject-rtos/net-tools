@@ -1,6 +1,10 @@
 # Module sources every suite needs, relative to ../modules.
 # build.sh reads this before the suite's own sources.txt.
 
+# Base types the shared layer is written in terms of, and which most protocol
+# modules import in turn.
+titan.ProtocolModules.COMMON/src/General_Types.ttcn
+
 titan.TestPorts.IPL4asp/src/IPL4asp_Types.ttcn
 titan.TestPorts.IPL4asp/src/IPL4asp_PortType.ttcn
 titan.TestPorts.IPL4asp/src/IPL4asp_Functions.ttcn

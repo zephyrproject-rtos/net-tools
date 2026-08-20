@@ -41,6 +41,9 @@ fi
 # it needs neither a main controller nor expect. A suite whose test cases
 # create parallel test components cannot use it, and says so in build.conf.
 MODE=single
+# Libraries a suite has to link against beyond what Titan itself needs. A test
+# port that talks to the network below the IP layer usually brings one.
+LIBS=
 if [ -f "$suite_dir/build.conf" ]; then
 	. "$suite_dir/build.conf"
 fi
@@ -83,7 +86,8 @@ link_source()
 
 # A suite that only runs test cases from a third party module has no sources
 # of its own, so an empty match here is not an error.
-for f in "$suite_dir"/*.ttcn "$here"/common/*.ttcn; do
+for f in "$suite_dir"/*.ttcn "$suite_dir"/*.cc "$suite_dir"/*.hh \
+	 "$here"/common/*.ttcn "$here"/common/*.cc "$here"/common/*.hh; do
 	if [ -f "$f" ]; then
 		link_source "$f"
 	fi
@@ -111,6 +115,7 @@ names=$(ls ./*.ttcn ./*.cc ./*.hh 2>/dev/null | sed 's#^\./##')
 
 make CPPFLAGS="-D\$(PLATFORM) -I. -I$titan_inc" \
      LDFLAGS="-L$titan_lib" \
+     LINUX_LIBS="-lxml2 $LIBS" \
      CXXFLAGS="-O2 -Wall -Wno-unused-variable -Wno-deprecated-declarations" \
      "$@"
 
