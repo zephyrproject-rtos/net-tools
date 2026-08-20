@@ -36,20 +36,38 @@ type component Zephyr_Tester {
  *
  * A local port of zero asks the system for a free one.
  */
-function f_udp_listen(in charstring p_local_addr, in integer p_local_port := 0)
+function f_udp_listen(in charstring p_local_addr, in integer p_local_port := 0,
+		      in boolean p_reuse := false)
 runs on Zephyr_Tester
 {
-	var Result v_res;
-
 	map(mtc:pt, system:pt);
 
-	v_res := f_IPL4_listen(pt, p_local_addr, p_local_port, { udp := {} });
+	v_connId := f_udp_open(p_local_addr, p_local_port, p_reuse);
+}
+
+/* Open a further socket on the port that is already mapped. A suite needs one
+ * when it has to receive on one address and send from another, which happens
+ * whenever a protocol is broadcast: the address a broadcast arrives at is not
+ * one that says which link to answer on.
+ */
+function f_udp_open(in charstring p_local_addr, in integer p_local_port := 0,
+		    in boolean p_reuse := false)
+runs on Zephyr_Tester return ConnectionId
+{
+	var OptionList v_options := {};
+	var Result v_res;
+
+	if (p_reuse) {
+		v_options := { { reuseAddress := { enable := true } } };
+	}
+
+	v_res := f_IPL4_listen(pt, p_local_addr, p_local_port, { udp := {} }, v_options);
 	if (not ispresent(v_res.connId)) {
 		setverdict(fail, "cannot open a socket on ", p_local_addr, ":", p_local_port);
 		stop;
 	}
 
-	v_connId := v_res.connId;
+	return v_res.connId;
 }
 
 function f_close() runs on Zephyr_Tester
@@ -62,11 +80,21 @@ function f_close() runs on Zephyr_Tester
 	unmap(mtc:pt, system:pt);
 }
 
-function f_send_to(in charstring p_addr, in integer p_port, in octetstring p_msg)
+/* Send from the socket f_udp_listen opened, or from another one when a
+ * connection id is given.
+ */
+function f_send_to(in charstring p_addr, in integer p_port, in octetstring p_msg,
+		   in ConnectionId p_connId := -1)
 runs on Zephyr_Tester
 {
+	var ConnectionId v_from := p_connId;
+
+	if (v_from == -1) {
+		v_from := v_connId;
+	}
+
 	pt.send(ASP_SendTo:{
-		connId := v_connId,
+		connId := v_from,
 		remName := p_addr,
 		remPort := p_port,
 		proto := omit,
