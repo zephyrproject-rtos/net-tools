@@ -1,0 +1,380 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Conformance tests for the Zephyr MQTT client, MQTT 3.1.1.
+ *
+ * The tester is the broker. It listens where a broker listens, takes the
+ * connection the client makes to it, and checks what arrives and what the
+ * client does with what it sends back.
+ *
+ * This is the first suite to work over a connection rather than over
+ * datagrams. Two things follow from that. The tester has to accept a
+ * connection before anything is said, which f_tcp_listen and f_tcp_accept in
+ * the shared layer do. And a connection is a stream with no message boundaries
+ * in it, so the port is told how to find the length of an MQTT message and
+ * hands whole messages up; the protocol module publishes the function for
+ * that, and f_open installs it.
+ *
+ * Each test case takes a connection of its own and closes it at the end. The
+ * system under test notices, waits a moment and connects again, so a test
+ * never inherits the state another one left. Nothing here depends on the order
+ * the tests run in.
+ *
+ * Packet identifiers and re-sending are not tested. Zephyr's client leaves
+ * both to the application: mqtt_publish() sends the identifier and the
+ * duplicate flag it is given, so a test of either would be a test of the
+ * system under test's own counter rather than of the client.
+ *
+ * The system under test is tests/net/conformance/mqtt in the Zephyr tree.
+ */
+module MQTT_Suite {
+
+import from General_Types all;
+import from IPL4asp_Types all;
+import from IPL4asp_PortType all;
+import from MQTT_v3_1_1_Types all;
+import from MQTT_v3_1_1_IPL4SizeFunction all;
+import from Socket_API_Definitions all;
+import from Zephyr_SUT all;
+import from Zephyr_Transport all;
+
+/* Where a broker listens. Not a privileged port, so this suite needs no
+ * privilege either.
+ */
+modulepar integer tsp_broker_port := 1883;
+
+/* What the system under test is configured with. */
+modulepar charstring tsp_client_id := "zephyr-conformance";
+modulepar charstring tsp_topic := "zephyr/conformance";
+modulepar integer tsp_keep_alive := 5;
+
+/* How long to wait for a keep alive ping. Zephyr's client pings once the keep
+ * alive has passed with nothing sent, so this has to outlast that.
+ */
+modulepar float tsp_ping_timeout := 12.0;
+
+/* Fixed by MQTT 3.1.1 section 3.1.2.1. */
+const charstring c_protocol_name := "MQTT";
+const integer c_protocol_level := 4;
+
+/* Connect return codes, MQTT 3.1.1 section 3.2.2.3. */
+const integer c_connack_accepted := 0;
+const integer c_connack_not_authorized := 5;
+
+type component MQTT_MTC extends Zephyr_Tester {}
+
+/* Listen, take the connection, and tell the port how to split the stream into
+ * messages. Without the length function the port would hand up whatever
+ * happened to arrive together, which is not the same as a message.
+ */
+function f_open() runs on MQTT_MTC
+{
+	var f_IPL4_getMsgLen v_length := refers(f_GetMsgLengthMQTT);
+
+	f_tcp_listen(tsp_tester_ipv4, tsp_broker_port);
+	f_tcp_accept();
+	f_IPL4_setGetMsgLen(pt, v_connId, v_length, {});
+}
+
+/* Wait for one message from the client. Fails the test case and stops it if
+ * nothing arrives or if what arrives is not a message, so callers can use the
+ * result without checking it first.
+ */
+function f_await_message(in float p_timeout := -1.0)
+runs on MQTT_MTC return MQTT_v3_1_1_ReqResp
+{
+	var ASP_RecvFrom v_recv := f_receive(p_timeout);
+	var MQTT_v3_1_1_Message v_msg;
+
+	if (f_MQTT_v3_1_1_dec(v_recv.msg, v_msg) != 0) {
+		setverdict(fail, "the client sent something that is not an "&
+			   "MQTT message: ", v_recv.msg);
+		stop;
+	}
+
+	if (not ischosen(v_msg.msg)) {
+		setverdict(fail, "the message did not decode into anything "&
+			   "the protocol knows");
+		stop;
+	}
+
+	return v_msg.msg;
+}
+
+function f_send_message(in MQTT_v3_1_1_ReqResp p_msg) runs on MQTT_MTC
+{
+	var octetstring v_bytes;
+
+	if (f_MQTT_v3_1_1_enc({ msg := p_msg }, v_bytes) != 0) {
+		setverdict(fail, "cannot encode a message to send");
+		stop;
+	}
+
+	f_send(v_bytes);
+}
+
+/* Wait for a message of one kind, letting anything else past. Used by the
+ * tests that are about one thing the client does among several.
+ */
+function f_await_publish(in float p_timeout := -1.0)
+runs on MQTT_MTC return MQTT_v3_1_1_Publish
+{
+	var MQTT_v3_1_1_ReqResp v_msg;
+
+	while (true) {
+		v_msg := f_await_message(p_timeout);
+		if (ischosen(v_msg.publish)) {
+			return v_msg.publish;
+		}
+	}
+
+	/* Not reached: f_await_message stops the test if nothing arrives. */
+	return { header := { dup_flag := '0'B,
+			     qos_level := AT_MOST_ONCE_DELIVERY,
+			     retain_flag := '0'B },
+		 topic_name := "",
+		 packet_identifier := omit,
+		 payload := ''O };
+}
+
+/* Require that nothing more is said on this connection.
+ *
+ * Scoped to the connection on purpose. The socket that was listening is still
+ * listening, so a client that gives up and connects again arrives on it, and
+ * that is a reasonable thing for it to do rather than an answer to anything.
+ */
+function f_expect_no_more(in charstring p_why) runs on MQTT_MTC
+{
+	var ASP_RecvFrom v_recv;
+	var IPL4asp_Types.ConnectionId v_this := v_connId;
+
+	t_guard.start(tsp_silence_timeout);
+	alt {
+	[] pt.receive(ASP_RecvFrom:?) -> value v_recv {
+		if (v_recv.connId != v_this) {
+			repeat;
+		}
+		t_guard.stop;
+		setverdict(fail, "said more when it should have stopped: ",
+			   p_why);
+	}
+	[] pt.receive(ASP_Event:?) {
+		repeat;
+	}
+	[] t_guard.timeout {
+		setverdict(pass);
+	}
+	}
+}
+
+/* The answer that lets a client get on with it, MQTT 3.1.1 section 3.2. */
+function f_connack(in integer p_code := c_connack_accepted)
+return MQTT_v3_1_1_ReqResp
+{
+	return { connack := {
+			header := { flags := '0000'B },
+			session_present_flag := '0'B,
+			connect_return_code := p_code } };
+}
+
+/* The acknowledgement of a publish sent at least once, section 3.4. */
+function f_puback(in integer p_identifier) return MQTT_v3_1_1_ReqResp
+{
+	return { puback := {
+			header := { flags := '0000'B },
+			packet_identifier := p_identifier } };
+}
+
+/* Take the connection and answer the connect, which is what every test but
+ * the two about connecting wants to have happened first.
+ */
+function f_connected() runs on MQTT_MTC
+{
+	var MQTT_v3_1_1_ReqResp v_msg;
+
+	f_open();
+
+	v_msg := f_await_message();
+	if (not ischosen(v_msg.connect_msg)) {
+		setverdict(fail, "the first message on a new connection was "&
+			   "not a connect");
+		stop;
+	}
+
+	f_send_message(f_connack());
+}
+
+/* A connect says which protocol it speaks, at which level, and who is
+ * speaking. MQTT 3.1.1 section 3.1.
+ */
+testcase tc_connect_is_well_formed() runs on MQTT_MTC
+{
+	var MQTT_v3_1_1_ReqResp v_msg;
+	var MQTT_v3_1_1_Connect v_connect;
+
+	f_open();
+
+	v_msg := f_await_message();
+	if (not ischosen(v_msg.connect_msg)) {
+		setverdict(fail, "the first message on a new connection was "&
+			   "not a connect");
+		f_tcp_close();
+		stop;
+	}
+
+	v_connect := v_msg.connect_msg;
+
+	if (v_connect.name != c_protocol_name) {
+		setverdict(fail, "the protocol name is ", v_connect.name,
+			   " rather than ", c_protocol_name);
+	}
+	if (v_connect.protocol_level != c_protocol_level) {
+		setverdict(fail, "the protocol level is ",
+			   v_connect.protocol_level, " rather than ",
+			   c_protocol_level, ", which is what 3.1.1 is");
+	}
+	if (v_connect.payload.client_identifier != tsp_client_id) {
+		setverdict(fail, "the client calls itself ",
+			   v_connect.payload.client_identifier, " rather than ",
+			   tsp_client_id);
+	}
+	if (v_connect.keep_alive != tsp_keep_alive) {
+		setverdict(fail, "the keep alive is ", v_connect.keep_alive,
+			   " rather than the configured ", tsp_keep_alive);
+	}
+
+	setverdict(pass);
+	f_tcp_close();
+}
+
+/* Zephyr's client sends nothing but the connect until the broker has accepted
+ * it: mqtt_publish() and the rest refuse with -ENOTCONN before the connack.
+ * This is a check of that behaviour, not a conformance point. MQTT 3.1.1
+ * section 3.1.4 lets a client send straight after the connect without
+ * waiting.
+ */
+testcase tc_nothing_is_sent_before_the_connack() runs on MQTT_MTC
+{
+	var MQTT_v3_1_1_ReqResp v_msg;
+
+	f_open();
+
+	v_msg := f_await_message();
+	if (not ischosen(v_msg.connect_msg)) {
+		setverdict(fail, "the first message on a new connection was "&
+			   "not a connect");
+		f_tcp_close();
+		stop;
+	}
+
+	/* Say nothing, and see whether the client does. */
+	f_expect_no_more("a connect that has not been answered");
+
+	f_tcp_close();
+}
+
+/* A publish says what it is publishing and where, and carries an identifier
+ * when it is sent at least once, so that it can be acknowledged.
+ * MQTT 3.1.1 section 3.3.
+ */
+testcase tc_publish_is_well_formed() runs on MQTT_MTC
+{
+	var MQTT_v3_1_1_Publish v_publish;
+
+	f_connected();
+	v_publish := f_await_publish();
+
+	if (v_publish.topic_name != tsp_topic) {
+		setverdict(fail, "the publish is to ", v_publish.topic_name,
+			   " rather than ", tsp_topic);
+	}
+	if (v_publish.header.qos_level != AT_LEAST_ONCE_DELIVERY) {
+		setverdict(fail, "the publish is at quality ",
+			   v_publish.header.qos_level,
+			   " rather than at least once");
+	}
+	if (not ispresent(v_publish.packet_identifier)) {
+		setverdict(fail, "a publish sent at least once carries no "&
+			   "identifier, so there is nothing to acknowledge");
+	}
+	if (v_publish.header.dup_flag != '0'B) {
+		setverdict(fail, "the first publish is marked as a duplicate");
+	}
+
+	setverdict(pass);
+	f_tcp_close();
+}
+
+/* A connection with nothing on it still has to be shown to be alive, or the
+ * broker is entitled to drop it. MQTT 3.1.1 section 3.1.2.10.
+ */
+testcase tc_keep_alive_is_sent_when_idle() runs on MQTT_MTC
+{
+	var MQTT_v3_1_1_ReqResp v_msg;
+	var boolean v_pinged := false;
+	var integer v_seen := 0;
+
+	f_connected();
+
+	/* Acknowledge the publishes so that the client has nothing outstanding
+	 * to send, and see whether a ping arrives among them.
+	 */
+	while (not v_pinged and v_seen < 20) {
+		v_msg := f_await_message(tsp_ping_timeout);
+		v_seen := v_seen + 1;
+
+		if (ischosen(v_msg.pingreq)) {
+			v_pinged := true;
+		} else if (ischosen(v_msg.publish)) {
+			f_send_message(f_puback(v_msg.publish.packet_identifier));
+		}
+	}
+
+	if (not v_pinged) {
+		setverdict(fail, "no ping in ", v_seen, " messages, so a broker "&
+			   "with nothing to say would have to guess whether the "&
+			   "client is still there");
+	} else {
+		setverdict(pass);
+	}
+
+	f_tcp_close();
+}
+
+/* A connect that is refused is not a connection. A client that publishes
+ * anyway is publishing into a session the broker has already said it will not
+ * open. MQTT 3.1.1 section 3.2.2.3.
+ */
+testcase tc_refused_connection_is_not_used() runs on MQTT_MTC
+{
+	var MQTT_v3_1_1_ReqResp v_msg;
+
+	f_open();
+
+	v_msg := f_await_message();
+	if (not ischosen(v_msg.connect_msg)) {
+		setverdict(fail, "the first message on a new connection was "&
+			   "not a connect");
+		f_tcp_close();
+		stop;
+	}
+
+	f_send_message(f_connack(c_connack_not_authorized));
+
+	f_expect_no_more("a connect that was refused");
+
+	f_tcp_close();
+}
+
+control {
+	execute(tc_connect_is_well_formed());
+	execute(tc_nothing_is_sent_before_the_connack());
+	execute(tc_publish_is_well_formed());
+	execute(tc_keep_alive_is_sent_when_idle());
+	execute(tc_refused_connection_is_not_used());
+}
+
+}
