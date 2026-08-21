@@ -24,6 +24,8 @@ import from Zephyr_SUT all;
 type component Zephyr_Tester {
 	port IPL4asp_PT pt;
 	var ConnectionId v_connId := -1;
+	/* Only a suite that accepts connections uses this, see f_tcp_listen. */
+	var ConnectionId v_listenId := -1;
 	timer t_guard;
 }
 
@@ -80,6 +82,95 @@ function f_close() runs on Zephyr_Tester
 	unmap(mtc:pt, system:pt);
 }
 
+/* Listen for connections on TCP.
+ *
+ * The listening socket is not one anything is read from: a connection to it
+ * arrives as a port event carrying a connection of its own, and that is what
+ * the suite then talks over. f_tcp_accept waits for it.
+ */
+function f_tcp_listen(in charstring p_local_addr, in integer p_local_port)
+runs on Zephyr_Tester
+{
+	var Result v_res;
+
+	map(mtc:pt, system:pt);
+
+	v_res := f_IPL4_listen(pt, p_local_addr, p_local_port, { tcp := {} }, {});
+	if (not ispresent(v_res.connId)) {
+		setverdict(fail, "cannot listen on ", p_local_addr, ":",
+			   p_local_port);
+		stop;
+	}
+
+	v_listenId := v_res.connId;
+}
+
+/* Wait for something to connect, and make what connected the socket that
+ * f_send and f_receive use. Fails the test case and stops it if nothing
+ * connects, so callers can carry on as though it had.
+ */
+function f_tcp_accept(in float p_timeout := -1.0)
+runs on Zephyr_Tester return ConnectionId
+{
+	var ASP_Event v_event;
+	var float v_timeout := p_timeout;
+
+	if (v_timeout < 0.0) {
+		v_timeout := tsp_response_timeout;
+	}
+
+	t_guard.start(v_timeout);
+	alt {
+	[] pt.receive(ASP_Event:{ connOpened := ? }) -> value v_event {
+		t_guard.stop;
+		v_connId := v_event.connOpened.connId;
+	}
+	[] pt.receive(ASP_Event:?) {
+		/* Some other notification, a closed connection for instance. */
+		repeat;
+	}
+	[] t_guard.timeout {
+		setverdict(fail, "nothing connected within ", v_timeout, "s");
+		stop;
+	}
+	}
+
+	return v_connId;
+}
+
+/* Close a connection and the socket that was listening for it. */
+function f_tcp_close() runs on Zephyr_Tester
+{
+	if (v_connId != -1) {
+		f_IPL4_close(pt, v_connId);
+		v_connId := -1;
+	}
+
+	if (v_listenId != -1) {
+		f_IPL4_close(pt, v_listenId);
+		v_listenId := -1;
+	}
+
+	unmap(mtc:pt, system:pt);
+}
+
+/* Send over a connection, which unlike a datagram needs no address. */
+function f_send(in octetstring p_msg, in ConnectionId p_connId := -1)
+runs on Zephyr_Tester
+{
+	var ConnectionId v_from := p_connId;
+
+	if (v_from == -1) {
+		v_from := v_connId;
+	}
+
+	pt.send(ASP_Send:{
+		connId := v_from,
+		proto := omit,
+		msg := p_msg
+	});
+}
+
 /* Send from the socket f_udp_listen opened, or from another one when a
  * connection id is given.
  */
@@ -119,6 +210,14 @@ function f_receive(in float p_timeout := -1.0) runs on Zephyr_Tester return ASP_
 	[] pt.receive(ASP_RecvFrom:?) -> value v_recv {
 		t_guard.stop;
 	}
+	[] pt.receive(ASP_Event:?) {
+		/* A notification rather than data: a connection opening or
+		 * closing under a suite that works over TCP. Left unmatched it
+		 * would sit at the head of the queue and hide everything after
+		 * it, so it is taken and dropped.
+		 */
+		repeat;
+	}
 	[] t_guard.timeout {
 		setverdict(fail, "nothing arrived within ", v_timeout, "s");
 		stop;
@@ -146,6 +245,10 @@ runs on Zephyr_Tester
 	[] pt.receive(ASP_RecvFrom:?) -> value v_recv {
 		t_guard.stop;
 		setverdict(fail, "answered when it should have stayed quiet: ", p_why);
+	}
+	[] pt.receive(ASP_Event:?) {
+		/* A notification is not an answer, see f_receive. */
+		repeat;
 	}
 	[] t_guard.timeout {
 		setverdict(pass);
