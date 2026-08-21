@@ -1,0 +1,5 @@
+# Module sources this suite needs on top of common/sources.txt,
+# relative to ../../modules.
+
+titan.ProtocolModules.DNS/src/DNS_Types.ttcn
+titan.ProtocolModules.DNS/src/DNS_EncDec.cc
