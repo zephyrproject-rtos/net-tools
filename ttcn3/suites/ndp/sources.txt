@@ -1,0 +1,7 @@
+# Module sources this suite needs on top of common/sources.txt,
+# relative to ../../modules.
+
+titan.ProtocolModules.NDP/src/NDP_Types.ttcn
+titan.ProtocolModules.NDP/src/NDP_EncDec.cc
+titan.ProtocolModules.IP/src/IP_Types.ttcn
+titan.ProtocolModules.IP/src/IP_EncDec.cc

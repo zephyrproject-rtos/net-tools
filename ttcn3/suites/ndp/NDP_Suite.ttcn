@@ -1,0 +1,734 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Conformance tests for Zephyr's IPv6 neighbour discovery, RFC 4861.
+ *
+ * The suite works below IP, so it reads and writes frames on the interface
+ * that has no address on the Linux side and has to be run as root. It builds
+ * its own ethernet, IPv6 and ICMPv6 headers, the same way the TCP suite does
+ * one protocol over.
+ *
+ * Only what the system under test does in answer to the tester is checked.
+ * What it does when it starts - the duplicate address detection for its own
+ * addresses, and the router solicitations that follow - is over before a suite
+ * can attach, so the one test here that watches an address being configured
+ * makes that happen by advertising a prefix rather than by waiting for a boot
+ * it cannot see.
+ *
+ * The application sends a datagram to the tester every couple of seconds, so
+ * an address the system under test cannot resolve keeps producing
+ * solicitations for the tests that examine those. Nothing else answers on this
+ * link, so a solicitation the suite does not answer stays unanswered.
+ *
+ * The system under test is tests/net/conformance/ndp in the Zephyr tree.
+ */
+module NDP_Suite {
+
+import from General_Types all;
+import from IP_Types all;
+import from NDP_Types all;
+import from Ethernet_Port all;
+import from Zephyr_SUT all;
+
+/* Has to match the source_address the ethernet port is configured with, so
+ * that what the tester claims in a message and what it sends from agree.
+ */
+modulepar charstring tsp_tester_mac := "020000000002";
+
+/* A link local address for the tester. An advertisement from a router is only
+ * accepted from one, RFC 4861 6.1.2.
+ */
+modulepar charstring tsp_tester_linklocal := "fe80::2";
+
+/* An address on the link that nothing holds, for the test that solicits one. */
+modulepar charstring tsp_unclaimed_ipv6 := "2001:db8::99";
+
+/* The prefix the tester advertises, and how long it says it lasts. */
+modulepar charstring tsp_advertised_prefix := "2001:db8:1::";
+modulepar integer tsp_prefix_lifetime := 600;
+
+/* Where the application sends its datagrams. */
+modulepar integer tsp_peer_port := 9999;
+
+const OCT2 c_ethertype_ipv6 := '86DD'O;
+
+/* IPv6 next header values. */
+const integer c_next_icmpv6 := 58;
+const integer c_next_udp := 17;
+
+/* ICMPv6 types that neighbour discovery uses, RFC 4861 4. */
+const integer c_type_router_solicitation := 133;
+const integer c_type_router_advertisement := 134;
+const integer c_type_neighbour_solicitation := 135;
+const integer c_type_neighbour_advertisement := 136;
+const integer c_type_redirect := 137;
+
+/* Everything neighbour discovery sends leaves with a hop limit of 255, and
+ * anything that arrives with less than that is discarded. That is what keeps
+ * the protocol on the link it belongs to. RFC 4861 7.1.1.
+ */
+const integer c_hop_limit := 255;
+
+const OCT16 c_addr_unspecified := '00000000000000000000000000000000'O;
+
+type component NDP_MTC {
+	port Ethernet_PT pt;
+	timer t_guard;
+	/* Learned from the first message the system under test sends. */
+	var OCT6 v_sut_mac := '000000000000'O;
+}
+
+/* A neighbour discovery message with the parts of the frame around it that
+ * the tests have something to say about.
+ */
+type record NdpSeen {
+	PDU_NDP pdu,
+	OCT16 src,
+	OCT16 dst,
+	OCT6 ethSrc,
+	OCT6 ethDst,
+	integer hopLimit
+}
+
+function f_mac(in charstring p_mac) return OCT6
+{
+	return str2oct(p_mac);
+}
+
+function f_ipv6(in charstring p_addr) return OCT16
+{
+	return f_IPv6_addr_enc(p_addr);
+}
+
+/* The solicited node multicast address of an address: ff02::1:ff and the last
+ * three octets of it. A node joins the group for each of its addresses, so
+ * that resolving one wakes only the node that holds it. RFC 4291 2.7.1.
+ */
+function f_solicited_node(in OCT16 p_addr) return OCT16
+{
+	return 'FF0200000000000000000001FF'O & substr(p_addr, 13, 3);
+}
+
+/* The ethernet address a multicast address is sent to: 33:33 and the last
+ * four octets. RFC 2464 7.
+ */
+function f_multicast_mac(in OCT16 p_addr) return OCT6
+{
+	return '3333'O & substr(p_addr, 12, 4);
+}
+
+/* All nodes on this link, where an advertisement goes when there is nobody in
+ * particular to send it to. RFC 4291 2.7.1.
+ */
+function f_all_nodes() return OCT16
+{
+	return f_ipv6("ff02::1");
+}
+
+function f_open() runs on NDP_MTC
+{
+	map(mtc:pt, system:pt);
+}
+
+function f_close() runs on NDP_MTC
+{
+	unmap(mtc:pt, system:pt);
+}
+
+/* Put a message on the link, wrapped in the headers it belongs in. The
+ * encoder works out the ICMPv6 checksum from the addresses it is given, which
+ * is why they are passed rather than taken from the packet.
+ */
+function f_send_ndp(in PDU_NDP p_pdu, in OCT16 p_src, in OCT16 p_dst,
+		    in OCT6 p_eth_dst, in integer p_hop_limit := c_hop_limit)
+runs on NDP_MTC
+{
+	var octetstring v_body := f_enc_PDU_NDP(p_pdu, p_src, p_dst);
+	var IPv6_packet v_ip;
+
+	v_ip := {
+		header := {
+			ver := 6,
+			trclass := 0,
+			flabel := 0,
+			plen := lengthof(v_body),
+			nexthead := c_next_icmpv6,
+			hlim := p_hop_limit,
+			srcaddr := p_src,
+			dstaddr := p_dst
+		},
+		ext_headers := omit,
+		payload := v_body
+	};
+
+	pt.send(Ethernet_Frame:{
+		destination := p_eth_dst,
+		source := f_mac(tsp_tester_mac),
+		etherType := c_ethertype_ipv6,
+		payload := f_IPv6_enc(v_ip)
+	});
+}
+
+/* Whether a frame carries a neighbour discovery message, and what of it the
+ * tests need. Everything else on the link - the datagrams the application
+ * sends, the multicast listener reports the stack sends - is not one.
+ */
+function f_as_ndp(in Ethernet_Frame p_frame, out NdpSeen p_seen) return boolean
+{
+	var IPv6_packet v_ip := f_IPv6_dec(p_frame.payload);
+	var integer v_type;
+
+	if (v_ip.header.nexthead != c_next_icmpv6) {
+		return false;
+	}
+
+	if (not ispresent(v_ip.payload) or lengthof(v_ip.payload) < 4) {
+		return false;
+	}
+
+	v_type := oct2int(substr(v_ip.payload, 0, 1));
+	if (v_type < c_type_router_solicitation or v_type > c_type_redirect) {
+		return false;
+	}
+
+	p_seen := {
+		pdu := f_dec_PDU_NDP(v_ip.payload),
+		src := v_ip.header.srcaddr,
+		dst := v_ip.header.dstaddr,
+		ethSrc := p_frame.source,
+		ethDst := p_frame.destination,
+		hopLimit := v_ip.header.hlim
+	};
+
+	return true;
+}
+
+/* Wait for a neighbour advertisement, ignoring everything else on the link.
+ * Fails the test case and stops it if none arrives, so callers can use the
+ * result without checking it first.
+ */
+function f_await_advertisement(in float p_timeout := -1.0)
+runs on NDP_MTC return NdpSeen
+{
+	var Ethernet_Frame v_frame;
+	var NdpSeen v_seen;
+	var float v_timeout := p_timeout;
+
+	if (v_timeout < 0.0) {
+		v_timeout := tsp_response_timeout;
+	}
+
+	t_guard.start(v_timeout);
+	alt {
+	[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+		if (f_as_ndp(v_frame, v_seen) and
+		    ischosen(v_seen.pdu.neighborAdvertisement)) {
+			t_guard.stop;
+			v_sut_mac := v_frame.source;
+		} else {
+			repeat;
+		}
+	}
+	[] t_guard.timeout {
+		setverdict(fail, "no neighbour advertisement within ",
+			   v_timeout, "s");
+		stop;
+	}
+	}
+
+	return v_seen;
+}
+
+/* The other half: an advertisement that must not arrive. Only advertisements
+ * are looked at, because the application keeps talking on the link whatever
+ * the tester does, and none of that is an answer.
+ */
+function f_expect_no_advertisement(in charstring p_why) runs on NDP_MTC
+{
+	var Ethernet_Frame v_frame;
+	var NdpSeen v_seen;
+
+	t_guard.start(tsp_silence_timeout);
+	alt {
+	[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+		if (f_as_ndp(v_frame, v_seen) and
+		    ischosen(v_seen.pdu.neighborAdvertisement)) {
+			t_guard.stop;
+			setverdict(fail, "answered when it should have stayed "&
+				   "quiet: ", p_why);
+		} else {
+			repeat;
+		}
+	}
+	[] t_guard.timeout {
+		setverdict(pass);
+	}
+	}
+}
+
+/* Wait for a solicitation for a given address. */
+function f_await_solicitation(in OCT16 p_target, in float p_timeout := -1.0)
+runs on NDP_MTC return NdpSeen
+{
+	var Ethernet_Frame v_frame;
+	var NdpSeen v_seen;
+	var float v_timeout := p_timeout;
+
+	if (v_timeout < 0.0) {
+		v_timeout := tsp_response_timeout;
+	}
+
+	t_guard.start(v_timeout);
+	alt {
+	[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+		if (f_as_ndp(v_frame, v_seen) and
+		    ischosen(v_seen.pdu.neighborSolicitation) and
+		    v_seen.pdu.neighborSolicitation.targetAddress == p_target) {
+			t_guard.stop;
+			v_sut_mac := v_frame.source;
+		} else {
+			repeat;
+		}
+	}
+	[] t_guard.timeout {
+		setverdict(fail, "no solicitation for ",
+			   f_IPv6_addr_dec(p_target), " within ", v_timeout, "s");
+		stop;
+	}
+	}
+
+	return v_seen;
+}
+
+/* Wait for a solicitation for any address inside a prefix, which is how an
+ * address the system under test has just given itself becomes visible.
+ */
+function f_await_solicitation_in_prefix(in OCT16 p_prefix, in integer p_octets,
+					in float p_timeout := -1.0)
+runs on NDP_MTC return NdpSeen
+{
+	var Ethernet_Frame v_frame;
+	var NdpSeen v_seen;
+	var float v_timeout := p_timeout;
+
+	if (v_timeout < 0.0) {
+		v_timeout := tsp_response_timeout;
+	}
+
+	t_guard.start(v_timeout);
+	alt {
+	[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+		if (f_as_ndp(v_frame, v_seen) and
+		    ischosen(v_seen.pdu.neighborSolicitation) and
+		    substr(v_seen.pdu.neighborSolicitation.targetAddress, 0,
+			   p_octets) == substr(p_prefix, 0, p_octets)) {
+			t_guard.stop;
+		} else {
+			repeat;
+		}
+	}
+	[] t_guard.timeout {
+		setverdict(fail, "no address was configured from the prefix ",
+			   f_IPv6_addr_dec(p_prefix), " within ", v_timeout, "s");
+		stop;
+	}
+	}
+
+	return v_seen;
+}
+
+/* Wait for a datagram to the tester, which is what resolution was for. */
+function f_await_datagram(in float p_timeout := -1.0) runs on NDP_MTC
+{
+	var Ethernet_Frame v_frame;
+	var IPv6_packet v_ip;
+	var float v_timeout := p_timeout;
+
+	if (v_timeout < 0.0) {
+		v_timeout := tsp_response_timeout;
+	}
+
+	t_guard.start(v_timeout);
+	alt {
+	[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+		v_ip := f_IPv6_dec(v_frame.payload);
+		if (v_ip.header.nexthead == c_next_udp and
+		    v_ip.header.dstaddr == f_ipv6(tsp_tester_ipv6)) {
+			t_guard.stop;
+		} else {
+			repeat;
+		}
+	}
+	[] t_guard.timeout {
+		setverdict(fail, "the datagram never followed the resolution, "&
+			   "so the advertisement was not taken");
+		stop;
+	}
+	}
+}
+
+/* A solicitation asking who holds an address. RFC 4861 4.3. */
+function f_solicitation(in OCT16 p_target, in boolean p_with_link_layer := true)
+return PDU_NDP
+{
+	var NSM_Options v_options := {};
+
+	if (p_with_link_layer) {
+		v_options := { { sourceLinkLayerAddress := {
+					optionType := 1,
+					lengthField := 0,
+					linkLayerAddrValue := f_mac(tsp_tester_mac) } } };
+	}
+
+	return { neighborSolicitation := {
+			typeField := c_type_neighbour_solicitation,
+			code := 0,
+			checksum := '0000'O,
+			reserved := '00000000'O,
+			targetAddress := p_target,
+			nSM_Options := v_options } };
+}
+
+/* An advertisement saying the tester holds an address. RFC 4861 4.4. */
+function f_advertisement(in OCT16 p_target) return PDU_NDP
+{
+	return { neighborAdvertisement := {
+			typeField := c_type_neighbour_advertisement,
+			code := 0,
+			checksum := '0000'O,
+			reserved1 := '00000'B,
+			oBit := '1'B,
+			sBit := '1'B,
+			rBit := '0'B,
+			reserved2 := '000000'O,
+			targetAddress := p_target,
+			nAM_Options := { { targetLinkLayerAddress := {
+						optionType := 2,
+						lengthField := 0,
+						linkLayerAddrValue :=
+							f_mac(tsp_tester_mac) } } } } };
+}
+
+/* A router advertisement carrying one prefix to configure an address from.
+ * RFC 4861 4.2, RFC 4862 5.5.3.
+ */
+function f_router_advertisement(in OCT16 p_prefix) return PDU_NDP
+{
+	return { routerAdvertisement := {
+			typeField := c_type_router_advertisement,
+			code := 0,
+			checksum := '0000'O,
+			curHopLimit := 64,
+			reserved := '000000'B,
+			oBit := '0'B,
+			mBit := '0'B,
+			routerLifetime := tsp_prefix_lifetime,
+			reachableTime := 0,
+			retransTimer := 0,
+			rAM_Options := {
+				{ sourceLinkLayerAddress := {
+					optionType := 1,
+					lengthField := 0,
+					linkLayerAddrValue := f_mac(tsp_tester_mac) } },
+				{ prefixInformation := {
+					optionType := 3,
+					lengthField := 4,
+					prefixLength := 64,
+					reserved1 := '000000'B,
+					aBit := '1'B,
+					lBit := '1'B,
+					validLifetime := tsp_prefix_lifetime,
+					preferredLifetime := tsp_prefix_lifetime,
+					reserved2 := '00000000'O,
+					prefix := p_prefix } } } } };
+}
+
+/* Everything an advertisement has to carry, whoever asked for it.
+ * RFC 4861 4.4 and 7.2.4.
+ */
+function f_check_advertisement(in NdpSeen p_seen, in OCT16 p_target)
+runs on NDP_MTC
+{
+	var NDP_NeighborAdvertisement v_na := p_seen.pdu.neighborAdvertisement;
+
+	if (v_na.targetAddress != p_target) {
+		setverdict(fail, "the advertisement is for ",
+			   f_IPv6_addr_dec(v_na.targetAddress), " rather than ",
+			   f_IPv6_addr_dec(p_target));
+	}
+	if (p_seen.hopLimit != c_hop_limit) {
+		setverdict(fail, "the advertisement left with hop limit ",
+			   p_seen.hopLimit, " rather than ", c_hop_limit,
+			   ", so a receiver has to discard it");
+	}
+	if (v_na.code != 0) {
+		setverdict(fail, "the code field is ", v_na.code,
+			   " rather than 0");
+	}
+	if (v_na.oBit != '1'B) {
+		setverdict(fail, "the override bit is clear, so a neighbour "&
+			   "that already had another address for this target "&
+			   "would keep it");
+	}
+	if (not ispresent(v_na.nAM_Options) or
+	    lengthof(v_na.nAM_Options) == 0) {
+		setverdict(fail, "the advertisement carries no target link "&
+			   "layer address, so it does not say where to send");
+		return;
+	}
+	if (substr(v_na.nAM_Options[0].targetLinkLayerAddress.linkLayerAddrValue,
+		   0, 6) != p_seen.ethSrc) {
+		setverdict(fail, "the target link layer address option and the "&
+			   "address the frame came from are different");
+	}
+}
+
+/* A solicitation for an address the system under test holds is answered, and
+ * the answer goes back to whoever asked. RFC 4861 7.2.4.
+ */
+testcase tc_solicitation_is_answered() runs on NDP_MTC
+{
+	var OCT16 v_target := f_ipv6(tsp_sut_ipv6);
+	var NdpSeen v_seen;
+
+	f_open();
+
+	f_send_ndp(f_solicitation(v_target), f_ipv6(tsp_tester_ipv6),
+		   f_solicited_node(v_target),
+		   f_multicast_mac(f_solicited_node(v_target)));
+
+	v_seen := f_await_advertisement();
+	f_check_advertisement(v_seen, v_target);
+
+	if (v_seen.pdu.neighborAdvertisement.sBit != '1'B) {
+		setverdict(fail, "the solicited bit is clear in an answer to a "&
+			   "solicitation, so the asker cannot treat it as one");
+	}
+	if (v_seen.dst != f_ipv6(tsp_tester_ipv6)) {
+		setverdict(fail, "the answer went to ",
+			   f_IPv6_addr_dec(v_seen.dst),
+			   " rather than back to the address that asked");
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/* A solicitation for an address it does not hold is not its to answer. */
+testcase tc_solicitation_for_another_address_is_ignored() runs on NDP_MTC
+{
+	var OCT16 v_target := f_ipv6(tsp_unclaimed_ipv6);
+
+	f_open();
+
+	f_send_ndp(f_solicitation(v_target), f_ipv6(tsp_tester_ipv6),
+		   f_solicited_node(v_target),
+		   f_multicast_mac(f_solicited_node(v_target)));
+
+	f_expect_no_advertisement("a solicitation for an address it does not hold");
+
+	f_close();
+}
+
+/* A solicitation from the unspecified address is somebody else checking that
+ * an address is free before taking it. There is nowhere to send an answer, so
+ * the answer goes to every node on the link, and it is not solicited: nobody
+ * asked for it at an address. RFC 4861 7.2.4.
+ */
+testcase tc_solicitation_from_the_unspecified_address_is_multicast() runs on NDP_MTC
+{
+	var OCT16 v_target := f_ipv6(tsp_sut_ipv6);
+	var NdpSeen v_seen;
+
+	f_open();
+
+	/* No source link layer option: there is no source to describe, and one
+	 * here would make the message invalid. RFC 4861 7.1.1.
+	 */
+	f_send_ndp(f_solicitation(v_target, false), c_addr_unspecified,
+		   f_solicited_node(v_target),
+		   f_multicast_mac(f_solicited_node(v_target)));
+
+	v_seen := f_await_advertisement();
+	f_check_advertisement(v_seen, v_target);
+
+	if (v_seen.pdu.neighborAdvertisement.sBit != '0'B) {
+		setverdict(fail, "the solicited bit is set in an answer that "&
+			   "nobody can have solicited, because the solicitation "&
+			   "came from no address");
+	}
+	if (v_seen.dst != f_all_nodes()) {
+		setverdict(fail, "the answer went to ",
+			   f_IPv6_addr_dec(v_seen.dst),
+			   " rather than to every node on the link");
+	}
+	if (v_seen.ethDst != f_multicast_mac(f_all_nodes())) {
+		setverdict(fail, "the answer left to ", v_seen.ethDst,
+			   " rather than to the all nodes group address");
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/* Neighbour discovery is a conversation between nodes on one link, and the
+ * hop limit is what proves a message never crossed a router. Anything that
+ * arrives with less than 255 has, and has to be discarded. RFC 4861 7.1.1.
+ */
+testcase tc_solicitation_with_a_low_hop_limit_is_ignored() runs on NDP_MTC
+{
+	var OCT16 v_target := f_ipv6(tsp_sut_ipv6);
+
+	f_open();
+
+	f_send_ndp(f_solicitation(v_target), f_ipv6(tsp_tester_ipv6),
+		   f_solicited_node(v_target),
+		   f_multicast_mac(f_solicited_node(v_target)), 64);
+
+	f_expect_no_advertisement("a solicitation that reached the link with a "&
+				  "hop limit of 64, so it came through a router");
+
+	f_close();
+}
+
+/* A solicitation from the unspecified address that carries a source link
+ * layer address is contradicting itself, and is discarded rather than
+ * answered. RFC 4861 7.1.1.
+ */
+testcase tc_solicitation_from_nowhere_with_a_link_layer_address_is_ignored()
+runs on NDP_MTC
+{
+	var OCT16 v_target := f_ipv6(tsp_sut_ipv6);
+
+	f_open();
+
+	f_send_ndp(f_solicitation(v_target, true), c_addr_unspecified,
+		   f_solicited_node(v_target),
+		   f_multicast_mac(f_solicited_node(v_target)));
+
+	f_expect_no_advertisement("a solicitation from no address that still "&
+				  "says where to answer");
+
+	f_close();
+}
+
+/* Before sending to an address it has not resolved, a node asks who holds it.
+ * The application keeps sending, so the question keeps coming. RFC 4861 7.2.2.
+ */
+testcase tc_it_asks_before_it_sends() runs on NDP_MTC
+{
+	var OCT16 v_tester := f_ipv6(tsp_tester_ipv6);
+	var NdpSeen v_seen;
+	var NDP_NeighborSolicitation v_ns;
+
+	f_open();
+
+	v_seen := f_await_solicitation(v_tester);
+	v_ns := v_seen.pdu.neighborSolicitation;
+
+	if (v_seen.hopLimit != c_hop_limit) {
+		setverdict(fail, "the solicitation left with hop limit ",
+			   v_seen.hopLimit, " rather than ", c_hop_limit);
+	}
+	if (v_seen.dst != f_solicited_node(v_tester)) {
+		setverdict(fail, "the solicitation went to ",
+			   f_IPv6_addr_dec(v_seen.dst), " rather than to the "&
+			   "solicited node group of the address it is asking about");
+	}
+	if (v_seen.ethDst != f_multicast_mac(f_solicited_node(v_tester))) {
+		setverdict(fail, "the solicitation left to ", v_seen.ethDst,
+			   " rather than to the group address of that address");
+	}
+	if (v_ns.code != 0) {
+		setverdict(fail, "the code field is ", v_ns.code,
+			   " rather than 0");
+	}
+	if (not ispresent(v_ns.nSM_Options) or lengthof(v_ns.nSM_Options) == 0) {
+		setverdict(fail, "the solicitation carries no source link layer "&
+			   "address, so whoever answers has to ask in turn");
+	} else if (substr(v_ns.nSM_Options[0].sourceLinkLayerAddress.linkLayerAddrValue,
+			  0, 6) != v_seen.ethSrc) {
+		setverdict(fail, "the source link layer address option and the "&
+			   "address the frame came from are different");
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/* Answering the question lets the datagram that was waiting on it through.
+ * RFC 4861 7.2.5.
+ */
+testcase tc_advertisement_completes_resolution() runs on NDP_MTC
+{
+	var OCT16 v_tester := f_ipv6(tsp_tester_ipv6);
+	var NdpSeen v_seen;
+
+	f_open();
+
+	v_seen := f_await_solicitation(v_tester);
+
+	f_send_ndp(f_advertisement(v_tester), v_tester, v_seen.src,
+		   v_seen.ethSrc);
+
+	f_await_datagram();
+
+	setverdict(pass);
+	f_close();
+}
+
+/* A prefix advertised by a router is one a host gives itself an address from,
+ * and it checks that the address is free before using it. RFC 4862 5.5.3.
+ */
+testcase tc_router_advertisement_is_acted_on() runs on NDP_MTC
+{
+	var OCT16 v_prefix := f_ipv6(tsp_advertised_prefix);
+	var NdpSeen v_seen;
+
+	f_open();
+
+	f_send_ndp(f_router_advertisement(v_prefix),
+		   f_ipv6(tsp_tester_linklocal), f_all_nodes(),
+		   f_multicast_mac(f_all_nodes()));
+
+	/* The address is new, so the first thing sent from it is the check
+	 * that nobody else has it, which comes from no address at all.
+	 */
+	v_seen := f_await_solicitation_in_prefix(v_prefix, 8);
+
+	if (v_seen.src != c_addr_unspecified) {
+		setverdict(fail, "the check that the new address is free came "&
+			   "from ", f_IPv6_addr_dec(v_seen.src),
+			   " rather than from no address, so it is not one");
+	}
+	if (v_seen.hopLimit != c_hop_limit) {
+		setverdict(fail, "the solicitation left with hop limit ",
+			   v_seen.hopLimit, " rather than ", c_hop_limit);
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/* The two tests that watch the system under test resolve an address run first,
+ * and have to. A solicitation from the tester carries its own link layer
+ * address, which is enough for the system under test to remember it, and a
+ * remembered neighbour is confirmed by a unicast solicitation rather than
+ * resolved by a multicast one. Running them first is what keeps the tester
+ * unknown until they have finished.
+ */
+control {
+	execute(tc_it_asks_before_it_sends());
+	execute(tc_advertisement_completes_resolution());
+	execute(tc_solicitation_is_answered());
+	execute(tc_solicitation_for_another_address_is_ignored());
+	execute(tc_solicitation_from_the_unspecified_address_is_multicast());
+	execute(tc_solicitation_with_a_low_hop_limit_is_ignored());
+	execute(tc_solicitation_from_nowhere_with_a_link_layer_address_is_ignored());
+	execute(tc_router_advertisement_is_acted_on());
+}
+
+}
