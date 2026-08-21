@@ -1,0 +1,5 @@
+# Module sources this suite needs on top of common/sources.txt,
+# relative to ../../modules.
+#
+# None. The message is described by SNTP_Types.ttcn in this directory, because
+# the Titan project publishes no protocol module for SNTP.
