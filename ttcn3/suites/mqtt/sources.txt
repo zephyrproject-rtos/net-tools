@@ -1,0 +1,8 @@
+# Module sources this suite needs on top of common/sources.txt,
+# relative to ../../modules.
+
+titan.ProtocolModules.MQTT/src/MQTT_v3_1_1_Types.ttcn
+titan.ProtocolModules.MQTT/src/MQTT_v3_1_1_EncDec.cc
+# Splits the stream a connection carries into messages, see f_open.
+titan.ProtocolModules.MQTT/src/MQTT_v3_1_1_IPL4SizeFunction.ttcn
+titan.ProtocolModules.MQTT/src/MQTT_v3_1_1_Size.cc

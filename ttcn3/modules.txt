@@ -11,6 +11,7 @@ titan.ProtocolModules.CoAP                        db0da63d71e79e2075ca7bdd204403
 titan.misc                                        13454aa47843d4614a158b966c77490d0e5c5fbe
 titan.ProtocolModules.DHCP                        54a7944009686579a844c353c91ef22069d11320
 titan.ProtocolModules.COMMON                      7467160f763ab88e4b071dc057f58a764042e870
+titan.ProtocolModules.MQTT                        08dca6dabbd5f7ea2ab8e039ced93c7e3bae3438
 titan.ProtocolModules.NDP                         7acd3b551476ab56d26592afaeceecedec45e94c
 titan.ProtocolModules.IP                          0b4dab3f6eeaaf0532afb2ee5d82211faef05c69
 titan.ProtocolModules.TCP                         81c931982450d353f1d03402301d607dec5dab64
