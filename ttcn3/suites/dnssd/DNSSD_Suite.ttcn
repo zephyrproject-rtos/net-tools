@@ -1,0 +1,428 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Conformance tests for Zephyr's DNS service discovery, RFC 6763.
+ *
+ * The tester asks the responder about the service the system under test
+ * advertises, and checks what comes back. Queries go to the multicast DNS
+ * group address, because the responder binds its socket to the group rather
+ * than to the wildcard address and so never sees a query addressed to it.
+ *
+ * The tester's own port is ephemeral rather than 5353, so every query here is
+ * a legacy unicast query in the sense of RFC 6762 6.7. The hostname side of
+ * the responder adapts its answer to one; the service discovery side does not,
+ * and that divergence is recorded in f_check_legacy_shape below rather than
+ * asserted away.
+ *
+ * The system under test is tests/net/conformance/dnssd in the Zephyr tree.
+ */
+module DNSSD_Suite {
+
+import from DNS_Types all;
+import from IPL4asp_Types all;
+import from IPL4asp_PortType all;
+import from TCCConversion_Functions all;
+import from Zephyr_SUT all;
+import from Zephyr_Transport all;
+
+const charstring c_mdns_group_v4 := "224.0.0.251";
+const integer c_mdns_port := 5353;
+
+const RRClass c_class_in := 1;
+
+/* Bit 15 of the class field, which asks a multicast DNS cache to flush what
+ * it held for the name. RFC 6762 10.2.
+ */
+const RRClass c_class_in_flush := 32769;
+
+/* The life RFC 6762 6.7 gives an answer to a legacy unicast query, because
+ * whatever cached it may know nothing about multicast DNS.
+ */
+const integer c_mdns_legacy_ttl := 10;
+
+/* The service the system under test advertises. Has to match what its
+ * DNS_SD_REGISTER_TCP_SERVICE names and the port it is given.
+ */
+modulepar charstring tsp_service_type := "_zephyr._tcp.local";
+modulepar charstring tsp_service_instance := "zephyr._zephyr._tcp.local";
+modulepar integer tsp_service_port := 4242;
+
+/* Where a query for the list of service types goes. RFC 6763 9. */
+modulepar charstring tsp_enumeration_name := "_services._dns-sd._udp.local";
+
+/* A service type nothing on the link offers. */
+modulepar charstring tsp_unknown_service := "_nosuch._tcp.local";
+
+type component DNSSD_MTC extends Zephyr_Tester {}
+
+/* A query for one name and one type, as a resolver on the link would send it. */
+template PDU_DNS ts_query(charstring p_name, RRType p_type, integer p_id := 0) := {
+	header := {
+		id := p_id,
+		qr := DNS_QUERY,
+		opCode := DNS_OP_QUERY,
+		aa := false,
+		tc := false,
+		rd := false,
+		ra := false,
+		z := '000'B,
+		rCode := DNS_NO_ERROR,
+		qdCount := 1,
+		anCount := 0,
+		nsCount := 0,
+		arCount := 0
+	},
+	queries := { { qName := p_name, qType := p_type, qClass := DNS_IN } },
+	answers := {},
+	nameServerRecords := {},
+	additionalRecords := {}
+}
+
+function f_open() runs on DNSSD_MTC
+{
+	f_udp_listen(tsp_tester_ipv4);
+}
+
+function f_send_query(in charstring p_name, in RRType p_type,
+		      in integer p_id := 0)
+runs on DNSSD_MTC
+{
+	f_send_to(c_mdns_group_v4, c_mdns_port,
+		  enc_PDU_DNS(valueof(ts_query(p_name, p_type, p_id)), false, true));
+}
+
+/* Wait for an answer from the system under test.
+ *
+ * A query goes to the group address, so anything else on the link that speaks
+ * multicast DNS answers it too, and on a developer's machine there usually is
+ * something. Those answers are skipped rather than failed: they say nothing
+ * about the system under test either way.
+ */
+function f_await_response() runs on DNSSD_MTC return PDU_DNS
+{
+	var ASP_RecvFrom v_recv;
+
+	t_guard.start(tsp_response_timeout);
+	alt {
+	[] pt.receive(ASP_RecvFrom:?) -> value v_recv {
+		if (v_recv.remName != tsp_sut_ipv4 and
+		    v_recv.remName != tsp_sut_ipv6) {
+			repeat;
+		}
+		t_guard.stop;
+	}
+	[] t_guard.timeout {
+		setverdict(fail, "the system under test did not answer within ",
+			   tsp_response_timeout, "s");
+		stop;
+	}
+	}
+
+	return dec_PDU_DNS(v_recv.msg);
+}
+
+/* The other half: the system under test must not answer, whatever anything
+ * else on the link chooses to do.
+ */
+function f_expect_no_response(in charstring p_why) runs on DNSSD_MTC
+{
+	var ASP_RecvFrom v_recv;
+
+	t_guard.start(tsp_silence_timeout);
+	alt {
+	[] pt.receive(ASP_RecvFrom:?) -> value v_recv {
+		if (v_recv.remName != tsp_sut_ipv4 and
+		    v_recv.remName != tsp_sut_ipv6) {
+			repeat;
+		}
+		t_guard.stop;
+		setverdict(fail, "answered when it should have stayed quiet: ",
+			   p_why);
+	}
+	[] t_guard.timeout {
+		setverdict(pass);
+	}
+	}
+}
+
+/* An answer carries its records in more than one section: what was asked for
+ * goes in the answer section and what saves the asker a second lookup goes in
+ * the additional section, RFC 6763 12. A client reads both, so the tests look
+ * in both rather than fixing which section a record has to be in.
+ */
+function f_all_records(in PDU_DNS p_pdu) return ResourceRecords
+{
+	return p_pdu.answers & p_pdu.additionalRecords;
+}
+
+function f_find_record(in PDU_DNS p_pdu, in charstring p_name, in RRType p_type,
+		       out ResourceRecord p_rr) return boolean
+{
+	var ResourceRecords v_all := f_all_records(p_pdu);
+
+	for (var integer i := 0; i < lengthof(v_all); i := i + 1) {
+		if (v_all[i].name == p_name and v_all[i].rrType == p_type) {
+			p_rr := v_all[i];
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/* A pointer record whose data is a given name, whatever else the answer
+ * carries. Both the list of service types and the list of instances of one
+ * type are pointer records, so both tests want this.
+ */
+function f_has_pointer_to(in PDU_DNS p_pdu, in charstring p_name,
+			  in charstring p_target) return boolean
+{
+	var ResourceRecords v_all := f_all_records(p_pdu);
+
+	for (var integer i := 0; i < lengthof(v_all); i := i + 1) {
+		if (v_all[i].name == p_name and v_all[i].rrType == DNS_PTR and
+		    ischosen(v_all[i].rData.ptr) and
+		    v_all[i].rData.ptr == p_target) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/* The port a service record names.
+ *
+ * A record whose class carries the cache flush bit is not in a class the
+ * decoder knows, so it hands the data back undecoded, the same way the mDNS
+ * suite has to read an address. The layout is fixed by RFC 2782: priority,
+ * weight and port, two octets each, and then the target name.
+ */
+function f_srv_port(in ResourceRecord p_rr) runs on DNSSD_MTC return integer
+{
+	var octetstring v_data;
+
+	if (ischosen(p_rr.rData.srv)) {
+		return p_rr.rData.srv.portnum;
+	}
+
+	if (not ischosen(p_rr.rData.unsupported)) {
+		setverdict(fail, "the service record data is in neither form "&
+			   "this suite can read");
+		return -1;
+	}
+
+	v_data := p_rr.rData.unsupported;
+	if (lengthof(v_data) < 6) {
+		setverdict(fail, "the service record data is ", lengthof(v_data),
+			   " octets, too short to hold a port");
+		return -1;
+	}
+
+	return oct2int(substr(v_data, 4, 2));
+}
+
+/* What an answer to a legacy unicast query looks like today.
+ *
+ * RFC 6762 6.7 asks for an answer such a querier can read: the identifier it
+ * used echoed back, the question repeated, and a time to live short enough
+ * that a cache which knows nothing of multicast DNS does not hold the record
+ * for hours.
+ *
+ * The hostname side of the responder does all of that. The service discovery
+ * side builds its own messages and does none of it: it answers with the
+ * identifier zero, no question section, the cache flush bit set on the records
+ * that belong to one instance, and the lifetimes it would have used for a
+ * multicast answer. Asserting the standard here would leave a test that
+ * fails until somebody fixes it, so what is asserted is what it does, and the
+ * divergence is recorded rather than lost. Each check says what would have to
+ * change with it.
+ *
+ * The pointer record is checked as correct rather than recorded: it goes out
+ * without the cache flush bit, which is right in any answer, because several
+ * instances of a service share that name. RFC 6762 10.2.
+ */
+function f_check_legacy_shape(in PDU_DNS p_pdu, in integer p_id)
+runs on DNSSD_MTC
+{
+	var ResourceRecords v_all := f_all_records(p_pdu);
+
+	if (p_pdu.header.id == p_id and p_id != 0) {
+		setverdict(fail, "the answer now echoes the identifier of the "&
+			   "query, which RFC 6762 6.7 asks for and this suite "&
+			   "records as not happening: update the test and the "&
+			   "known gaps");
+	}
+	if (lengthof(p_pdu.queries) != 0) {
+		setverdict(fail, "the answer now repeats the question, which "&
+			   "RFC 6762 6.7 asks for and this suite records as not "&
+			   "happening: update the test and the known gaps");
+	}
+	if (lengthof(v_all) == 0) {
+		setverdict(fail, "the answer carries no records at all");
+		return;
+	}
+
+	for (var integer i := 0; i < lengthof(v_all); i := i + 1) {
+		if (oct2int(v_all[i].ttl) <= c_mdns_legacy_ttl) {
+			setverdict(fail, "a record now lives only ",
+				   oct2int(v_all[i].ttl), " seconds, which is "&
+				   "what RFC 6762 6.7 asks of an answer to a "&
+				   "legacy query and this suite records as not "&
+				   "happening: update the test and the known gaps");
+		}
+
+		if (v_all[i].rrType == DNS_PTR) {
+			if (v_all[i].rrClass != c_class_in) {
+				setverdict(fail, "the pointer record carries the "&
+					   "cache flush bit, which RFC 6762 10.2 "&
+					   "keeps clear because several instances "&
+					   "share that name");
+			}
+		} else if (v_all[i].rrClass == c_class_in) {
+			setverdict(fail, "the record for ", v_all[i].name,
+				   " now leaves the cache flush bit clear, which "&
+				   "RFC 6762 6.7 asks of an answer to a legacy "&
+				   "query and this suite records as not "&
+				   "happening: update the test and the known gaps");
+		}
+	}
+}
+
+/* Asking for the list of service types on the link names the one the system
+ * under test offers. RFC 6763 9.
+ */
+testcase tc_service_type_is_enumerated() runs on DNSSD_MTC
+{
+	var PDU_DNS v_rsp;
+
+	f_open();
+
+	f_send_query(tsp_enumeration_name, DNS_PTR);
+	v_rsp := f_await_response();
+
+	if (not f_has_pointer_to(v_rsp, tsp_enumeration_name, tsp_service_type)) {
+		setverdict(fail, "the list of service types does not name ",
+			   tsp_service_type);
+	} else {
+		setverdict(pass);
+	}
+
+	f_close();
+}
+
+/* Asking about a service type names the instance of it. RFC 6763 4.1. */
+testcase tc_service_instance_is_named() runs on DNSSD_MTC
+{
+	var PDU_DNS v_rsp;
+
+	f_open();
+
+	f_send_query(tsp_service_type, DNS_PTR);
+	v_rsp := f_await_response();
+
+	if (not f_has_pointer_to(v_rsp, tsp_service_type, tsp_service_instance)) {
+		setverdict(fail, "the answer does not name the instance ",
+			   tsp_service_instance);
+	} else {
+		setverdict(pass);
+	}
+
+	f_close();
+}
+
+/* The answer says where the service is, so that naming it was enough.
+ * RFC 6763 5 and 12.
+ */
+testcase tc_answer_carries_the_service_details() runs on DNSSD_MTC
+{
+	var PDU_DNS v_rsp;
+	var ResourceRecord v_srv;
+
+	f_open();
+
+	f_send_query(tsp_service_type, DNS_PTR);
+	v_rsp := f_await_response();
+
+	if (not f_find_record(v_rsp, tsp_service_instance, DNS_SRV, v_srv)) {
+		setverdict(fail, "the answer carries no service record for ",
+			   tsp_service_instance, ", so a client has to ask again "&
+			   "before it can connect");
+		f_close();
+		stop;
+	}
+
+	if (f_srv_port(v_srv) != tsp_service_port) {
+		setverdict(fail, "the service is at port ", f_srv_port(v_srv),
+			   " rather than ", tsp_service_port);
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/* A client that has resolved a service should not have to look up the host
+ * separately, so the address travels with the answer. RFC 6763 12.
+ */
+testcase tc_answer_carries_the_address() runs on DNSSD_MTC
+{
+	var PDU_DNS v_rsp;
+	var ResourceRecord v_a;
+
+	f_open();
+
+	f_send_query(tsp_service_type, DNS_PTR);
+	v_rsp := f_await_response();
+
+	if (not f_find_record(v_rsp, tsp_sut_hostname & ".local", DNS_A, v_a)) {
+		setverdict(fail, "the answer carries no address for ",
+			   tsp_sut_hostname & ".local", ", so resolving the "&
+			   "service took a second lookup");
+	} else {
+		setverdict(pass);
+	}
+
+	f_close();
+}
+
+/* A service nothing on the link offers is not something to answer about. */
+testcase tc_unknown_service_is_ignored() runs on DNSSD_MTC
+{
+	f_open();
+
+	f_send_query(tsp_unknown_service, DNS_PTR);
+	f_expect_no_response("a query for a service type it does not offer");
+
+	f_close();
+}
+
+/* The answer to a legacy unicast query, as it is rather than as RFC 6762 6.7
+ * asks. See f_check_legacy_shape for why it is written this way round.
+ */
+testcase tc_legacy_query_answer_is_not_adapted() runs on DNSSD_MTC
+{
+	var PDU_DNS v_rsp;
+
+	f_open();
+
+	f_send_query(tsp_service_type, DNS_PTR, 4660);
+	v_rsp := f_await_response();
+
+	f_check_legacy_shape(v_rsp, 4660);
+
+	setverdict(pass);
+	f_close();
+}
+
+control {
+	execute(tc_service_type_is_enumerated());
+	execute(tc_service_instance_is_named());
+	execute(tc_answer_carries_the_service_details());
+	execute(tc_answer_carries_the_address());
+	execute(tc_unknown_service_is_ignored());
+	execute(tc_legacy_query_answer_is_not_adapted());
+}
+
+}
