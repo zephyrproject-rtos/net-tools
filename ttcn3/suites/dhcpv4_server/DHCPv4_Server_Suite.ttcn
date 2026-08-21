@@ -1,0 +1,686 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Conformance tests for the Zephyr DHCPv4 server, RFC 2131.
+ *
+ * The mirror image of the DHCPv4 client suite: here the tester is the client,
+ * so it listens on the port a client listens on, which is why this suite needs
+ * a privileged port too. The ports are written into RFC 2131 2 and cannot be
+ * moved.
+ *
+ * Every message the tester sends asks for a broadcast reply. RFC 2131 4.1
+ * has the server answer a client that has no address yet either by broadcast
+ * or by writing the frame to the hardware address itself, and the second of
+ * those would be addressed to an address nothing on this host holds. Setting
+ * the flag is what a real client in that position does, so nothing is
+ * distorted by asking for it.
+ *
+ * Each test case appears as a client of its own, with its own hardware address
+ * and transaction identifier, so that no test depends on what an earlier one
+ * left behind. The server keeps its bindings for the life of the run, so the
+ * pool in the system under test is larger than the default to leave room.
+ *
+ * The system under test is tests/net/conformance/dhcpv4_server in the Zephyr
+ * tree.
+ */
+module DHCPv4_Server_Suite {
+
+import from General_Types all;
+import from DHCP_Types all;
+import from DHCP_Options all;
+import from IPL4asp_Types all;
+import from IPL4asp_PortType all;
+import from TCCConversion_Functions all;
+import from Zephyr_SUT all;
+import from Zephyr_Transport all;
+
+/* Fixed by RFC 2131 2. */
+const integer c_server_port := 67;
+const integer c_client_port := 68;
+
+const charstring c_broadcast := "255.255.255.255";
+
+/* RFC 2131 2, the BROADCAST flag. */
+const OCT2 c_flags_broadcast := '8000'O;
+
+const OCT4 c_addr_any := '00000000'O;
+const OCT4 c_magic_cookie := '63825363'O;
+
+/* The lowest address the system under test hands out, and how many it has.
+ * Has to match what the application passes to net_dhcpv4_server_start() and
+ * CONFIG_NET_DHCPV4_SERVER_ADDR_COUNT.
+ */
+modulepar charstring tsp_pool_base := "192.0.2.100";
+modulepar integer tsp_pool_size := 16;
+
+/* An address on a different network from the one the server serves, for the
+ * test that asks for something the server cannot give.
+ */
+modulepar charstring tsp_foreign_address := "198.51.100.5";
+
+/* What the tester asks for as a lease, in seconds. */
+modulepar integer tsp_lease_request := 600;
+
+type component DHCPv4_Server_MTC extends Zephyr_Tester {
+	/* Messages leave through a second socket, see f_open. */
+	var ConnectionId v_send_connId := -1;
+}
+
+/* Who the tester is pretending to be. The server tells clients apart by the
+ * hardware address when there is no client identifier option, so a test that
+ * wants to be somebody new only has to pick a different one.
+ */
+type record ClientId {
+	OCT16 chaddr,
+	OCT4 xid
+}
+
+/* Addresses a test has taken and has to give back. */
+type record of OCT4 AddressList;
+
+/* The first of the clients that look for a released address, numbered clear
+ * of the ones the other tests use.
+ */
+const integer c_searcher_base := 100;
+
+/* Two sockets on the same port, for the two halves of the exchange.
+ *
+ * Replies arrive addressed to the broadcast address, which only a socket bound
+ * to the wildcard address sees. Messages go to the broadcast address in turn,
+ * and a socket bound to the wildcard has nothing to say which link that means,
+ * so the message would leave through whichever interface the host routes a
+ * broadcast to. Binding the second socket to the address facing the device
+ * settles it.
+ *
+ * A reply to an Inform is addressed to the tester rather than broadcast, and
+ * arrives on the second socket. Both are on the same port, so either way it
+ * reaches the same receive statement.
+ */
+function f_open() runs on DHCPv4_Server_MTC
+{
+	f_udp_listen("0.0.0.0", c_client_port, true);
+	v_send_connId := f_udp_open(tsp_tester_ipv4, c_client_port, true);
+}
+
+function f_close_all() runs on DHCPv4_Server_MTC
+{
+	if (v_send_connId != -1) {
+		f_IPL4_close(pt, v_send_connId);
+		v_send_connId := -1;
+	}
+
+	f_close();
+}
+
+/* A hardware address and a transaction identifier that no other test uses. */
+function f_client(in integer p_index) return ClientId
+{
+	return {
+		chaddr := '02'O & '0000'O & int2oct(p_index, 3) & '00000000000000000000'O,
+		xid := 'C0DE'O & int2oct(p_index, 2)
+	};
+}
+
+function f_addr(in charstring p_addr) return OCT4
+{
+	return f_convertIPAddrToBinary(p_addr);
+}
+
+/* Whether an address is one the server said it would hand out. */
+function f_in_pool(in OCT4 p_addr) return boolean
+{
+	var integer v_base := oct2int(f_addr(tsp_pool_base));
+	var integer v_addr := oct2int(p_addr);
+
+	return v_addr >= v_base and v_addr < v_base + tsp_pool_size;
+}
+
+function f_opt_server_id() return DHCP_OPTION
+{
+	return { server_identifier := {
+			code := DHCP_Server_Identifier_OPTION_TYPE,
+			len := 4,
+			val := f_addr(tsp_sut_ipv4) } };
+}
+
+function f_opt_requested_ip(in OCT4 p_addr) return DHCP_OPTION
+{
+	return { requested_IP_address := {
+			code := DHCP_Requested_IP_Address_OPTION_TYPE,
+			len := 4,
+			val := p_addr } };
+}
+
+function f_opt_lease_time(in integer p_seconds) return DHCP_OPTION
+{
+	return { IP_address_lease_time := {
+			code := DHCP_IP_Address_Lease_Time_OPTION_TYPE,
+			len := 4,
+			val := p_seconds } };
+}
+
+/* A message from the client, with the message type option first and the end
+ * option last, which is where RFC 2131 3 puts them.
+ */
+function f_client_msg(in ClientId p_client, in DHCP_Message_Types p_type,
+		      in OCT4 p_ciaddr, in DHCP_OPTIONS p_options)
+return DHCP_MSG
+{
+	/* The concatenation needs both sides to have a type of their own, so
+	 * the two fixed options cannot be written into the expression.
+	 */
+	var DHCP_OPTIONS v_head := { { message_type := {
+					code := DHCP_Message_Type_OPTION_TYPE,
+					len := 1,
+					val := p_type } } };
+	var DHCP_OPTIONS v_tail := { { end := { code := DHCP_END_OPTION_TYPE } } };
+
+	return {
+		op := 1,
+		htype := DHCP_HTYPE_Ethernet_10Mb,
+		hlen := 6,
+		hops := 0,
+		xid := p_client.xid,
+		secs := 0,
+		flags := c_flags_broadcast,
+		ciaddr := p_ciaddr,
+		yiaddr := c_addr_any,
+		siaddr := c_addr_any,
+		giaddr := c_addr_any,
+		chaddr := p_client.chaddr,
+		sname := { sname := "" },
+		file := { file := "" },
+		options := {
+			magicCookie := c_magic_cookie,
+			options := v_head & p_options & v_tail
+		}
+	};
+}
+
+function f_send_msg(in DHCP_MSG p_msg) runs on DHCPv4_Server_MTC
+{
+	f_send_to(c_broadcast, c_server_port,
+		  enc_PDU_DHCP({ bOOT_REQUEST := p_msg }), v_send_connId);
+}
+
+/* Wait for the next reply. Fails the test case and stops it if nothing
+ * arrives or if what arrives is not a reply, so callers can use the result.
+ */
+function f_await_reply() runs on DHCPv4_Server_MTC return DHCP_MSG
+{
+	var ASP_RecvFrom v_recv := f_receive();
+	var PDU_DHCP v_pdu := dec_PDU_DHCP(v_recv.msg);
+
+	if (ischosen(v_pdu.erroneousPDU)) {
+		setverdict(fail, "the server sent something that is not a DHCP message");
+		stop;
+	}
+
+	if (not ischosen(v_pdu.bOOT_REPLY)) {
+		setverdict(fail, "the server sent a request rather than a reply");
+		stop;
+	}
+
+	return v_pdu.bOOT_REPLY;
+}
+
+/* The message type is an option rather than a field, so it has to be looked
+ * up. A message without one is not a DHCP message at all, only BOOTP.
+ */
+function f_message_type(in DHCP_MSG p_msg) runs on DHCPv4_Server_MTC
+return DHCP_Message_Types
+{
+	if (not ispresent(p_msg.options)) {
+		setverdict(fail, "the reply carries no options at all");
+		stop;
+	}
+
+	for (var integer i := 0; i < lengthof(p_msg.options.options); i := i + 1) {
+		if (ischosen(p_msg.options.options[i].message_type)) {
+			return p_msg.options.options[i].message_type.val;
+		}
+	}
+
+	setverdict(fail, "the reply carries no message type option, so a client "&
+		   "cannot tell what it is");
+	stop;
+}
+
+/* The server identifier, which a client needs in order to address the request
+ * that accepts an offer. RFC 2131 4.3.1 requires it in every reply but a Nak
+ * generated by a relay agent.
+ */
+function f_server_id(in DHCP_MSG p_msg) runs on DHCPv4_Server_MTC return OCT4
+{
+	if (ispresent(p_msg.options)) {
+		for (var integer i := 0; i < lengthof(p_msg.options.options); i := i + 1) {
+			if (ischosen(p_msg.options.options[i].server_identifier)) {
+				return p_msg.options.options[i].server_identifier.val;
+			}
+		}
+	}
+
+	setverdict(fail, "the reply carries no server identifier option");
+	stop;
+}
+
+/* The lease time, or -1 when the reply does not carry one. */
+function f_lease_time(in DHCP_MSG p_msg) return integer
+{
+	if (ispresent(p_msg.options)) {
+		for (var integer i := 0; i < lengthof(p_msg.options.options); i := i + 1) {
+			if (ischosen(p_msg.options.options[i].IP_address_lease_time)) {
+				return p_msg.options.options[i].IP_address_lease_time.val;
+			}
+		}
+	}
+
+	return -1;
+}
+
+/* Wait for a reply that belongs to this client and is of the type expected.
+ * Anything else fails the test rather than being skipped over: a reply to
+ * somebody else's transaction on a link with one client on it is a fault in
+ * itself.
+ */
+function f_await_type(in ClientId p_client, in DHCP_Message_Types p_type)
+runs on DHCPv4_Server_MTC return DHCP_MSG
+{
+	var DHCP_MSG v_reply := f_await_reply();
+	var DHCP_Message_Types v_type := f_message_type(v_reply);
+
+	if (v_reply.xid != p_client.xid) {
+		setverdict(fail, "the reply carries transaction ", v_reply.xid,
+			   " rather than ", p_client.xid);
+		stop;
+	}
+
+	if (v_type != p_type) {
+		setverdict(fail, "the server sent ", v_type, " where ", p_type,
+			   " was called for");
+		stop;
+	}
+
+	return v_reply;
+}
+
+/* Everything a reply has to mirror from the message it answers. RFC 2131 4.1
+ * and table 3.
+ */
+function f_check_reply_shape(in ClientId p_client, in DHCP_MSG p_reply)
+runs on DHCPv4_Server_MTC
+{
+	if (p_reply.op != 2) {
+		setverdict(fail, "the reply has op ", p_reply.op, " rather than 2");
+	}
+	if (p_reply.htype != DHCP_HTYPE_Ethernet_10Mb) {
+		setverdict(fail, "the hardware type is ", p_reply.htype,
+			   " rather than ethernet");
+	}
+	if (p_reply.hlen != 6) {
+		setverdict(fail, "the hardware address length is ", p_reply.hlen,
+			   " rather than 6");
+	}
+	if (p_reply.chaddr != p_client.chaddr) {
+		setverdict(fail, "the reply carries hardware address ",
+			   p_reply.chaddr, " rather than ", p_client.chaddr);
+	}
+	if (p_reply.giaddr != c_addr_any) {
+		setverdict(fail, "the relay agent address is set in a reply to "&
+			   "a message that did not go through a relay");
+	}
+	if (not ispresent(p_reply.options)) {
+		setverdict(fail, "the reply carries no options at all");
+		return;
+	}
+	if (p_reply.options.magicCookie != c_magic_cookie) {
+		setverdict(fail, "the option field does not start with the magic cookie");
+	}
+	if (f_server_id(p_reply) != f_addr(tsp_sut_ipv4)) {
+		setverdict(fail, "the server identifies itself as ",
+			   f_server_id(p_reply), " rather than ", tsp_sut_ipv4);
+	}
+}
+
+/* Ask for an address and take the offer. Used by the tests that are about
+ * what happens to a lease once it exists.
+ */
+function f_take_a_lease(in ClientId p_client) runs on DHCPv4_Server_MTC return OCT4
+{
+	var DHCP_MSG v_offer;
+	var DHCP_MSG v_ack;
+
+	f_send_msg(f_client_msg(p_client, DHCP_Discover, c_addr_any, {}));
+	v_offer := f_await_type(p_client, DHCP_Offer);
+
+	f_send_msg(f_client_msg(p_client, DHCP_Request, c_addr_any,
+				{ f_opt_server_id(),
+				  f_opt_requested_ip(v_offer.yiaddr),
+				  f_opt_lease_time(tsp_lease_request) }));
+	v_ack := f_await_type(p_client, DHCP_Ack);
+
+	if (v_ack.yiaddr != v_offer.yiaddr) {
+		setverdict(fail, "the acknowledgement is for ", v_ack.yiaddr,
+			   " rather than the offered ", v_offer.yiaddr);
+		stop;
+	}
+
+	return v_ack.yiaddr;
+}
+
+/* A Discover has to be answered with an Offer of a free address from the
+ * pool, carrying what the client needs to accept it. RFC 2131 4.3.1.
+ */
+testcase tc_discover_is_offered_an_address() runs on DHCPv4_Server_MTC
+{
+	var ClientId v_client := f_client(1);
+	var DHCP_MSG v_offer;
+
+	f_open();
+
+	f_send_msg(f_client_msg(v_client, DHCP_Discover, c_addr_any, {}));
+	v_offer := f_await_type(v_client, DHCP_Offer);
+
+	f_check_reply_shape(v_client, v_offer);
+
+	if (not f_in_pool(v_offer.yiaddr)) {
+		setverdict(fail, "the offered address ", v_offer.yiaddr,
+			   " is not one of the ", tsp_pool_size,
+			   " the server was given");
+	}
+	if (v_offer.ciaddr != c_addr_any) {
+		setverdict(fail, "the client address is set in an offer to a "&
+			   "client that has none");
+	}
+	if (f_lease_time(v_offer) <= 0) {
+		setverdict(fail, "the offer carries no lease time, so the client "&
+			   "does not know how long it may keep the address");
+	}
+
+	setverdict(pass);
+	f_close_all();
+}
+
+/* The request that accepts an offer is answered with an acknowledgement of
+ * the same address. RFC 2131 4.3.2, the Selecting case.
+ */
+testcase tc_request_completes_the_exchange() runs on DHCPv4_Server_MTC
+{
+	var ClientId v_client := f_client(2);
+	var DHCP_MSG v_offer;
+	var DHCP_MSG v_ack;
+
+	f_open();
+
+	f_send_msg(f_client_msg(v_client, DHCP_Discover, c_addr_any, {}));
+	v_offer := f_await_type(v_client, DHCP_Offer);
+
+	f_send_msg(f_client_msg(v_client, DHCP_Request, c_addr_any,
+				{ f_opt_server_id(),
+				  f_opt_requested_ip(v_offer.yiaddr),
+				  f_opt_lease_time(tsp_lease_request) }));
+	v_ack := f_await_type(v_client, DHCP_Ack);
+
+	f_check_reply_shape(v_client, v_ack);
+
+	if (v_ack.yiaddr != v_offer.yiaddr) {
+		setverdict(fail, "the acknowledgement is for ", v_ack.yiaddr,
+			   " rather than the offered ", v_offer.yiaddr);
+	}
+	if (f_lease_time(v_ack) <= 0) {
+		setverdict(fail, "the acknowledgement carries no lease time");
+	}
+
+	setverdict(pass);
+	f_close_all();
+}
+
+/* A client that asks twice before accepting anything is offered the same
+ * address both times: the server has a binding for it by then, and RFC 2131
+ * 4.3.1 has that binding chosen first.
+ */
+testcase tc_the_same_client_is_offered_the_same_address() runs on DHCPv4_Server_MTC
+{
+	var ClientId v_client := f_client(3);
+	var DHCP_MSG v_first;
+	var DHCP_MSG v_second;
+
+	f_open();
+
+	f_send_msg(f_client_msg(v_client, DHCP_Discover, c_addr_any, {}));
+	v_first := f_await_type(v_client, DHCP_Offer);
+
+	f_send_msg(f_client_msg(v_client, DHCP_Discover, c_addr_any, {}));
+	v_second := f_await_type(v_client, DHCP_Offer);
+
+	if (v_second.yiaddr != v_first.yiaddr) {
+		setverdict(fail, "the same client was offered ", v_first.yiaddr,
+			   " and then ", v_second.yiaddr);
+	} else {
+		setverdict(pass);
+	}
+
+	f_close_all();
+}
+
+/* Two clients are not offered the same address. An address that is spoken for
+ * is not free, and offering it twice would have the second client take an
+ * address the first is about to use.
+ */
+testcase tc_another_client_is_offered_another_address() runs on DHCPv4_Server_MTC
+{
+	var ClientId v_first := f_client(4);
+	var ClientId v_second := f_client(5);
+	var DHCP_MSG v_offer_first;
+	var DHCP_MSG v_offer_second;
+
+	f_open();
+
+	f_send_msg(f_client_msg(v_first, DHCP_Discover, c_addr_any, {}));
+	v_offer_first := f_await_type(v_first, DHCP_Offer);
+
+	f_send_msg(f_client_msg(v_second, DHCP_Discover, c_addr_any, {}));
+	v_offer_second := f_await_type(v_second, DHCP_Offer);
+
+	if (v_offer_second.yiaddr == v_offer_first.yiaddr) {
+		setverdict(fail, "both clients were offered ", v_offer_first.yiaddr);
+	} else {
+		setverdict(pass);
+	}
+
+	f_close_all();
+}
+
+/* A client that comes back knowing the address it had asks for it without
+ * naming a server. The server that has the binding acknowledges it.
+ * RFC 2131 4.3.2, the Init-Reboot case.
+ */
+testcase tc_init_reboot_request_is_acknowledged() runs on DHCPv4_Server_MTC
+{
+	var ClientId v_client := f_client(6);
+	var OCT4 v_leased;
+	var DHCP_MSG v_ack;
+
+	f_open();
+	v_leased := f_take_a_lease(v_client);
+
+	f_send_msg(f_client_msg(v_client, DHCP_Request, c_addr_any,
+				{ f_opt_requested_ip(v_leased) }));
+	v_ack := f_await_type(v_client, DHCP_Ack);
+
+	f_check_reply_shape(v_client, v_ack);
+
+	if (v_ack.yiaddr != v_leased) {
+		setverdict(fail, "the client was given ", v_ack.yiaddr,
+			   " rather than the ", v_leased, " it asked to keep");
+	} else {
+		setverdict(pass);
+	}
+
+	f_close_all();
+}
+
+/* A client asking to keep an address that is not on this network has moved,
+ * and has to be told so rather than left waiting. RFC 2131 4.3.2 asks for a
+ * Nak, and for one message in reply to one message.
+ */
+testcase tc_request_from_another_subnet_is_refused() runs on DHCPv4_Server_MTC
+{
+	var ClientId v_client := f_client(7);
+	var DHCP_MSG v_nak;
+
+	f_open();
+
+	f_send_msg(f_client_msg(v_client, DHCP_Request, c_addr_any,
+				{ f_opt_requested_ip(f_addr(tsp_foreign_address)) }));
+	v_nak := f_await_type(v_client, DHCP_Nak);
+
+	f_check_reply_shape(v_client, v_nak);
+
+	if (v_nak.yiaddr != c_addr_any) {
+		setverdict(fail, "a refusal carries the address ", v_nak.yiaddr,
+			   " where it should carry none");
+	}
+
+	/* One request, one reply. A client that is told no twice for the same
+	 * request has to work out that the second refusal is not the answer to
+	 * whatever it does next.
+	 */
+	f_expect_silence("a second refusal for a single request");
+
+	f_close_all();
+}
+
+/* An address that is given back is marked as not allocated, so it can be
+ * handed out again. RFC 2131 4.3.4.
+ *
+ * Which free address a server offers is its own choice, so new clients take
+ * leases until the released one comes round, and all of them are given back
+ * at the end so that the tests after this one find the pool as it was. There
+ * are only so many addresses, which bounds the search.
+ */
+testcase tc_release_gives_the_address_back() runs on DHCPv4_Server_MTC
+{
+	var ClientId v_client := f_client(8);
+	var OCT4 v_released;
+	var AddressList v_held := {};
+	var boolean v_found := false;
+
+	f_open();
+	v_released := f_take_a_lease(v_client);
+
+	f_send_msg(f_client_msg(v_client, DHCP_Release, v_released,
+				{ f_opt_server_id() }));
+
+	/* A release is not answered. RFC 2131 table 3. */
+	f_expect_silence("a release, which nothing answers");
+
+	for (var integer i := 0; i < tsp_pool_size and not v_found; i := i + 1) {
+		v_held[i] := f_take_a_lease(f_client(c_searcher_base + i));
+		v_found := v_held[i] == v_released;
+	}
+
+	for (var integer i := 0; i < lengthof(v_held); i := i + 1) {
+		f_send_msg(f_client_msg(f_client(c_searcher_base + i), DHCP_Release,
+					v_held[i], { f_opt_server_id() }));
+	}
+
+	if (v_found) {
+		setverdict(pass);
+	} else {
+		setverdict(fail, "none of ", lengthof(v_held), " new clients was "&
+			   "given ", v_released, " after it had been released");
+	}
+
+	f_close_all();
+}
+
+/* An address a client says is already in use must not be handed out again.
+ * RFC 2131 4.3.3.
+ */
+testcase tc_decline_takes_the_address_out_of_the_pool() runs on DHCPv4_Server_MTC
+{
+	var ClientId v_client := f_client(9);
+	var DHCP_MSG v_first;
+	var DHCP_MSG v_second;
+
+	f_open();
+
+	f_send_msg(f_client_msg(v_client, DHCP_Discover, c_addr_any, {}));
+	v_first := f_await_type(v_client, DHCP_Offer);
+
+	f_send_msg(f_client_msg(v_client, DHCP_Decline, c_addr_any,
+				{ f_opt_server_id(),
+				  f_opt_requested_ip(v_first.yiaddr) }));
+
+	/* A decline is not answered either. */
+	f_expect_silence("a decline, which nothing answers");
+
+	f_send_msg(f_client_msg(v_client, DHCP_Discover, c_addr_any, {}));
+	v_second := f_await_type(v_client, DHCP_Offer);
+
+	if (v_second.yiaddr == v_first.yiaddr) {
+		setverdict(fail, "the server offered ", v_first.yiaddr,
+			   " again after being told it was already in use");
+	} else if (not f_in_pool(v_second.yiaddr)) {
+		setverdict(fail, "the replacement address ", v_second.yiaddr,
+			   " is not one of the ", tsp_pool_size,
+			   " the server was given");
+	} else {
+		setverdict(pass);
+	}
+
+	f_close_all();
+}
+
+/* A client that configured its own address can still ask for the rest of the
+ * parameters. The answer carries no address and no lease, because none was
+ * given. RFC 2131 4.3.5.
+ */
+testcase tc_inform_is_answered_without_a_lease() runs on DHCPv4_Server_MTC
+{
+	var ClientId v_client := f_client(10);
+	var DHCP_MSG v_ack;
+
+	f_open();
+
+	/* The tester's own address, because the answer to an Inform goes to
+	 * the address the client says it already has.
+	 */
+	f_send_msg(f_client_msg(v_client, DHCP_Inform,
+				f_addr(tsp_tester_ipv4), {}));
+	v_ack := f_await_type(v_client, DHCP_Ack);
+
+	f_check_reply_shape(v_client, v_ack);
+
+	if (v_ack.yiaddr != c_addr_any) {
+		setverdict(fail, "the answer to an inform carries the address ",
+			   v_ack.yiaddr, " where it should carry none: nothing "&
+			   "was leased");
+	}
+	if (f_lease_time(v_ack) != -1) {
+		setverdict(fail, "the answer to an inform carries a lease time "&
+			   "of ", f_lease_time(v_ack), " for a lease that does "&
+			   "not exist");
+	}
+
+	setverdict(pass);
+	f_close_all();
+}
+
+control {
+	execute(tc_discover_is_offered_an_address());
+	execute(tc_request_completes_the_exchange());
+	execute(tc_the_same_client_is_offered_the_same_address());
+	execute(tc_another_client_is_offered_another_address());
+	execute(tc_init_reboot_request_is_acknowledged());
+	execute(tc_request_from_another_subnet_is_refused());
+	execute(tc_release_gives_the_address_back());
+	execute(tc_decline_takes_the_address_out_of_the_pool());
+	execute(tc_inform_is_answered_without_a_lease());
+}
+
+}
