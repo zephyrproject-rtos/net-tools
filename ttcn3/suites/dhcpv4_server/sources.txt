@@ -1,0 +1,6 @@
+# Module sources this suite needs on top of common/sources.txt,
+# relative to ../../modules.
+
+titan.ProtocolModules.DHCP/src/DHCP_Options.ttcn
+titan.ProtocolModules.DHCP/src/DHCP_Types.ttcn
+titan.ProtocolModules.DHCP/src/DHCP_EncDec.cc
