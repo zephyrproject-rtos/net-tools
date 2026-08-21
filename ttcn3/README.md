@@ -4,97 +4,14 @@ Test suites written in [TTCN-3](https://www.ttcn-3.org/) and built with
 [Eclipse Titan](https://projects.eclipse.org/projects/tools.titan), run against
 a Zephyr instance over a real network interface.
 
-These are black box tests. A suite speaks the protocol to Zephyr the way any
-other host on the link would, and checks what comes back against the standard.
-Nothing is compiled into Zephyr for them, and no Zephyr side test hooks are
-needed: the system under test is an ordinary sample application.
+**The documentation for these suites lives in the Zephyr tree**, at
+[Protocol conformance testing with TTCN-3](https://docs.zephyrproject.org/latest/connectivity/networking/conformance/index.html).
+It covers what each suite tests, how to install Titan, how to set up the network
+interfaces, how to run everything through Twister, and how to add a suite. Start
+there.
 
-| Suite | System under test | What it covers |
-|---|---|---|
-| `mdns` | `tests/net/conformance/mdns` | Name resolution over IPv4 and IPv6, record shape, silence for names the responder does not own |
-| `dns` | `tests/net/conformance/dns` | Query shape, identifier unpredictability, and what the resolver does with unanswered, forged and malformed answers |
-| `coap` | `tests/net/conformance/coap` | The ETSI derived CoAP core test cases, run against a server exposing /test |
-| `dhcpv4` | `tests/net/conformance/dhcpv4` | Discover shape, retransmission, and the offer, request and acknowledge exchange |
-| `arp` | `tests/net/conformance/arp` | Answering for its own address, staying quiet about others, and asking before it sends |
-| `tcp` | `tests/net/conformance/tcp` | Handshake and sequence accounting, initial sequence numbers, data, close, reset, malformed segments, sequence wrap |
-
-## Getting a Titan
-
-Either install the packaged one:
-
-```
-sudo apt install --no-install-recommends eclipse-titan
-export TTCN3_DIR=/usr
-```
-
-or build a current one from source, following `docker/Dockerfile.ttcn3`, which
-is what continuous integration uses. The packaged version trails the protocol
-modules, so prefer the source build if a suite fails to compile.
-
-## Running a suite
-
-Fetch the third party modules the suites build against. This clones them into
-`modules/` at the commits pinned in `modules.txt`, and is safe to re-run:
-
-```
-./fetch-modules.sh
-```
-
-Bring up the network interface that faces Zephyr, and start the sample:
-
-```
-sudo ../net-setup.sh --config ../zeth.conf start
-west build -b native_sim -d build/mdns "$ZEPHYR_BASE/samples/net/mdns_responder"
-./build/mdns/zephyr/zephyr.exe &
-```
-
-Then build and run the suite:
-
-```
-./build.sh mdns
-cd suites/mdns/build && ./mdns ../mdns.cfg
-```
-
-A suite that has to bind a privileged port, or read frames off the link, says
-`PRIVILEGED=yes` in its `build.conf` and has to be run as root. `dhcpv4` does
-because DHCP is defined on ports 67 and 68 and there is no way to move it;
-`arp` and `tcp` do because reading frames needs a packet socket.
-
-A suite that works below the IP layer also says `L2=yes`, and uses a second
-interface described by `../zeth-l2.conf`. That interface is given no IP
-address on purpose. Linux answers address resolution and neighbour discovery
-for any address it holds on any interface unless told otherwise, and an answer
-from the host would be indistinguishable from an answer from Zephyr:
-
-```
-sudo ../net-setup.sh --config ../zeth-l2.conf --iface zethL2 start
-```
-
-A suite whose test cases create parallel test components cannot be run as one
-process. Those say `MODE=parallel` in a `build.conf`, and are run through the
-main controller instead, which needs `expect` installed:
-
-```
-./build.sh coap
-cd suites/coap/build && ttcn3_start ./coap ../coap.cfg
-```
-
-The last line of the output is the verdict:
-
-```
-Verdict statistics: 0 none (0.00 %), 7 pass (100.00 %), 0 inconc (0.00 %), 0 fail (0.00 %), 0 error (0.00 %).
-Test execution summary: 7 test cases were executed. Overall verdict: pass
-```
-
-To run one test case instead of the whole suite, name it on the command line:
-
-```
-./mdns ../mdns.cfg MDNS_Suite.tc_a_query
-```
-
-Addresses, the interface name and the timeouts all come from
-`[MODULE_PARAMETERS]` in the suite's `.cfg`, so a run can be moved onto a
-different link without touching the suite.
+What follows is the part that is specific to this repository: how the build
+works and how the third party modules are managed.
 
 ## Layout
 
@@ -107,52 +24,55 @@ build.sh         builds one suite
 suites/<name>/   the suite, its sources.txt and its .cfg
 ```
 
-`build.sh` links the suite sources, the shared layer and the module sources
-named in the suite's `sources.txt` into `suites/<name>/build`, and builds there.
-The flat layout matters: the makefile Titan generates builds a dependency rule
-with `sed` using the target stem as the pattern, which breaks as soon as a
-source is named through a path containing a slash.
+## Building a suite
 
-## Third party modules
+`./fetch-modules.sh` once, then:
 
-The suites build against protocol modules and test ports from the Eclipse Titan
-project, which are separate repositories under
-`https://gitlab.eclipse.org/eclipse/titan/`. They are not vendored here; they
-are cloned on demand and pinned by commit so that a suite which passes today
-still builds tomorrow.
+```
+./build.sh <suite> [make arguments]
+```
 
-One test port is written here rather than taken from them. The Titan project
-publishes `LANL2asp` for reading and writing ethernet frames, but it captures
-with libpcap and opens the handle with a zero read timeout, which on Linux
-asks the kernel to wait indefinitely for a capture block to fill. On a link as
-quiet as a test link the frames never reach the test, and there is no parameter
-to change it. `common/Ethernet_PT.cc` reads a packet socket instead.
+Anything after the suite name is passed to `make`, so `./build.sh mdns -j8` and
+`./build.sh mdns clean` both work. `TTCN3_DIR` has to point at a Titan
+installation; both the packaged layout (`include/titan`, `lib/titan`) and a
+source build (`include`, `lib`) are detected.
 
-They are distributed under the Eclipse Public License 2.0, whereas everything
-written here is Apache 2.0. Both are approved by the Open Source Initiative,
-which is what Zephyr asks of tooling that never becomes part of a Zephyr
-image; see `doc/contribute/external.rst` in the Zephyr tree.
+The result is `suites/<suite>/build/<suite>`. To run it, put Titan's library
+directory on `LD_LIBRARY_PATH` and give it the configuration file:
 
-To move a pin, change the commit in `modules.txt` and re-run
-`./fetch-modules.sh`.
+```
+cd suites/mdns/build && ./mdns ../mdns.cfg
+```
 
-## Adding a suite
+A single test case is run by naming it, which is the quick loop while writing
+one:
 
-1. Create `suites/<name>/` with the TTCN-3 source, a `sources.txt` naming the
-   module sources it needs, and a `<name>.cfg`. A suite that only runs test
-   cases from a third party module needs no source of its own; see `coap`.
-2. Take addresses and timeouts from `common/Zephyr_SUT.ttcn` rather than
-   writing them into the suite.
-3. If the suite needs a module that is not in `modules.txt` yet, add it there
-   with a pinned commit.
-4. If its test cases create parallel test components, or it has to bind a
-   privileged port, add a `build.conf` saying `MODE=parallel` or
-   `PRIVILEGED=yes`.
-5. Add a row to the table at the top of this file.
+```
+./mdns ../mdns.cfg MDNS_Suite.tc_a_query
+```
 
-## Building in the container
+`build.sh` wipes the build directory and rebuilds it flat, symlinking the suite
+sources, the shared layer and the module sources named in `common/sources.txt`
+and the suite's own `sources.txt` side by side. The flat layout matters: the
+makefile Titan generates builds a dependency rule with `sed` using the target
+stem as the pattern, which breaks as soon as a source is named through a path
+containing a slash.
 
-The image `docker/Dockerfile.ttcn3` builds carries a current Titan. Give it your
+### build.conf
+
+A suite may carry a `build.conf`, which is both sourced as a shell fragment by
+`build.sh` and read by the Zephyr side harness:
+
+| Setting | Effect |
+|---|---|
+| `MODE=parallel` | Test cases create parallel test components, so the suite is built for and run through Titan's main controller. Default is `MODE=single`. |
+| `PRIVILEGED=yes` | The suite binds a privileged port or opens a packet socket, so it has to be run as root. |
+| `L2=yes` | The suite works below the IP layer and wants the address-less `zethL2` interface. |
+| `LIBS=...` | Extra libraries to link against, beyond what Titan itself needs. |
+
+### Building in the container
+
+`docker/Dockerfile.ttcn3` builds an image carrying a current Titan. Give it your
 own user id when building a suite through a bind mount, or it leaves artifacts
 behind that you cannot delete:
 
@@ -161,43 +81,34 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/ttcn3" -w /ttcn3 \
        net-tools-ttcn3 ./build.sh mdns
 ```
 
-## The older TCP suite
+## Third party modules
 
-Intel published a TTCN-3 TCP suite in the `net-test-suites` repository, for the
-TCP rewrite. Its scenarios informed what the `tcp` suite covers, but none of its
-code is used, and it is not a starting point to return to.
+The suites build against protocol modules and test ports from the Eclipse Titan
+project, which are separate repositories under
+`https://gitlab.eclipse.org/eclipse/titan/`. They are not vendored here; they
+are cloned on demand and pinned by commit so that a suite which passes today
+still builds tomorrow. `modules.txt` holds one `<repository> <commit>` line per
+module. To move a pin, change the commit there and re-run `./fetch-modules.sh`.
 
-Forty-one of its forty-three test cases drive Zephyr through a JSON control
-channel rather than over the wire, and its central assertion compares the
-stack's internal TCP state name against an expected one. That tests the
-implementation rather than the protocol, breaks whenever the internals are
-renamed, and needs `CONFIG_NET_TEST_PROTOCOL`, which deliberately turns off
-initial sequence number randomisation — so it exercises a TCP that is not the
-one that ships. What it had that is worth keeping is the list of scenarios.
+One test port is written here rather than taken from them. The Titan project
+publishes `LANL2asp` for reading and writing ethernet frames, but it captures
+with libpcap and opens the handle with a zero read timeout, which on Linux
+asks the kernel to wait indefinitely for a capture block to fill. On a link as
+quiet as a test link the frames never reach the test, and there is no parameter
+to change it. `common/Ethernet_PT.cc` reads a packet socket instead.
 
-## Known gaps and divergences
+The modules are distributed under the Eclipse Public License 2.0, whereas
+everything written here is Apache 2.0. Both are approved by the Open Source
+Initiative, which is what Zephyr asks of tooling that never becomes part of a
+Zephyr image; see `doc/contribute/external.rst` in the Zephyr tree.
 
-Where a suite asserts behaviour that does not match the RFC, the assertion says
-so at the point it is made, so that the divergence is recorded rather than
-frozen in silently.
+## Configuration files
 
-Two findings that were recorded here have since been fixed and are now
-asserted by the suites instead: the mDNS responder answers a legacy unicast
-query conventionally, and the DNS resolver renews its source port.
+Addresses, the interface name and the timeouts all come from
+`[MODULE_PARAMETERS]` in the suite's `.cfg`, so a run can be moved onto a
+different link without touching the suite. A MAC address there is twelve
+hexadecimal digits with no separators, and `tsp_tester_mac` has to match the
+`source_address` given to the ethernet test port in the same file.
 
-**mDNS DNS-SD, RFC 6762 6.7.** The hostname side of the responder answers a
-legacy unicast query the way the RFC asks. The DNS-SD side does not: it builds
-its messages in `dns_sd.c`, which still sets the cache flush bit, uses its own
-long TTLs and echoes neither the identifier nor the question. Doing the same
-there means reworking the compression offsets those encoders compute from a
-fixed header size. No suite covers it yet either.
-
-**CoAP.** Two of the ETSI cases the suite publishes, `TD_COAP_BLOCK_01` and
-`TD_COAP_OBS_01`, are not run. They address a `/large` and an `/obs` resource,
-and the system under test provides only `/test`. Adding those resources, and
-the two cases with them, is the obvious next step for this suite.
-
-**DNS, RFC 5452 9.2.** The resolver renews its source port before a query to a
-server with nothing outstanding, which with the default of one query at a time
-means every query. Queries that overlap on one server still share a port, so
-the `dns` suite's check would not catch a regression in that case.
+Each suite logs to its build directory under the name set by `LogFile`, as
+`<suite>-<component>.<seq>.log`.
