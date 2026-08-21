@@ -1,0 +1,76 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* The SNTP message, RFC 4330 section 4.
+ *
+ * The Titan project publishes no protocol module for this one. The message is
+ * a fixed 48 octets with no options and no variable parts, so writing it out
+ * is less work than depending on something that would have to be found first,
+ * and it follows the same reasoning as ARP_Types in the shared layer.
+ *
+ * The authenticator that may follow the 48 octets is not described. Zephyr
+ * neither sends nor accepts one: sntp_recv_response() requires a datagram of
+ * exactly the header length, so anything carrying an authenticator would be
+ * discarded before it was looked at.
+ *
+ * The four timestamps are kept as octets rather than integers so that the
+ * encoding is not at the mercy of a byte order attribute. A timestamp is a
+ * 64-bit fixed point number, seconds in the first word and a binary fraction
+ * of a second in the second; the tests here only ever reason about the
+ * seconds, which oct2int reads in network order by definition.
+ */
+module SNTP_Types {
+
+import from General_Types all;
+
+type record SNTP_Packet {
+	INT2b	li,
+	INT3b	vn,
+	INT3b	mode,
+	LIN1	stratum,
+	LIN1	poll,
+	OCT1	precision,
+	OCT4	rootDelay,
+	OCT4	rootDispersion,
+	OCT4	referenceId,
+	OCT4	referenceSeconds,
+	OCT4	referenceFraction,
+	OCT4	originateSeconds,
+	OCT4	originateFraction,
+	OCT4	receiveSeconds,
+	OCT4	receiveFraction,
+	OCT4	transmitSeconds,
+	OCT4	transmitFraction
+} with { variant "FIELDORDER(msb)" }
+
+/* Length of the message above, which is also the only length Zephyr accepts. */
+const integer c_sntp_packet_length := 48;
+
+/* Leap indicator. A client sends 0; 3 in a reply says the server's own clock
+ * is not synchronised. RFC 4330 section 4.
+ */
+const INT2b c_sntp_li_none := 0;
+const INT2b c_sntp_li_unsynchronised := 3;
+
+/* Mode. A unicast request is 3 and the reply to it is 4. */
+const INT3b c_sntp_mode_client := 3;
+const INT3b c_sntp_mode_server := 4;
+
+/* Stratum. 0 in a reply is not a stratum at all but a kiss-o'-death packet,
+ * which carries a four character reason in the reference identifier instead
+ * of a time. RFC 4330 section 8.
+ */
+const LIN1 c_sntp_stratum_kod := 0;
+const LIN1 c_sntp_stratum_primary := 1;
+
+/* Seconds between the NTP epoch of 1 January 1900 and the POSIX epoch of
+ * 1 January 1970. A timestamp on the wire counts from the former.
+ */
+const integer c_ntp_epoch_offset := 2208988800;
+
+const OCT4 c_sntp_zero_word := '00000000'O;
+
+} with { encode "RAW" }

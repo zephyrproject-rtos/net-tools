@@ -1,0 +1,571 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Conformance tests for the Zephyr SNTP client, RFC 4330.
+ *
+ * The tester is the time server. What is under test is the request the client
+ * puts on the wire, and which replies it is willing to take the time from.
+ *
+ * The second half of that is the interesting half, and it is visible from
+ * outside because the system under test does what an SNTP client is for: it
+ * sets the system clock from the answer. Zephyr stamps every request with the
+ * current real time, so the next request after a reply says whether the reply
+ * was accepted - it carries the offered time if it was, and the old time if it
+ * was not. No channel into the device is needed to see it.
+ *
+ * Each test that examines a rejection first synchronises the clock to a time of
+ * its own, so that it can then offer a different one and show that the clock
+ * did not move to it. That makes the tests independent of each other and of
+ * the order they run in, and it costs one extra exchange.
+ *
+ * The system under test is tests/net/conformance/sntp in the Zephyr tree.
+ */
+module SNTP_Suite {
+
+import from General_Types all;
+import from IPL4asp_Types all;
+import from IPL4asp_PortType all;
+import from SNTP_Types all;
+import from Zephyr_SUT all;
+import from Zephyr_Transport all;
+
+/* Where the tester listens. Not port 123: this needs no privileges, and it
+ * cannot collide with a time daemon already running on the host.
+ */
+modulepar integer tsp_sntp_port := 12123;
+
+/* How many requests the test that looks at several of them collects. */
+modulepar integer tsp_request_sample := 4;
+
+/* How far the clock in a request may be from the time that was offered for it
+ * to count as having been accepted. It only has to cover the round trip and
+ * the interval the client waits between queries.
+ */
+modulepar integer tsp_clock_tolerance := 60;
+
+/* The times the tests offer, as seconds since the POSIX epoch. They are years
+ * apart so that a clock which did not move is unmistakable, and each test uses
+ * one of its own so that nothing carries over from the test before.
+ *
+ *   3886790400 NTP = 2023-03-03,
+ *   3786825600 NTP = 2020-01-01, 3644956800 = 2015-07-04,
+ *   3529958400 NTP = 2011-11-11, 3427142400 = 2008-08-08,
+ *   3324240000 NTP = 2005-05-05
+ *
+ * tsp_time_accepted is where the rejection tests put the clock first, so the
+ * test that a reply sets the clock offers a time of its own instead: one the
+ * clock cannot already be at, whatever ran before it.
+ */
+modulepar integer tsp_time_set := 1677801600;
+modulepar integer tsp_time_accepted := 1577836800;
+modulepar integer tsp_time_originate := 1435968000;
+modulepar integer tsp_time_mode := 1320969600;
+modulepar integer tsp_time_kod := 1218153600;
+modulepar integer tsp_time_truncated := 1115251200;
+
+/* How long to watch for retransmissions. It has to outlast one query, which
+ * the client gives up on after its own timeout, but not so much that the
+ * queries which follow are counted as retransmissions of it.
+ */
+modulepar float tsp_backoff_window := 2.5;
+
+/* How many requests that window has to hold for the client to be
+ * retransmitting rather than merely asking again on its own schedule.
+ */
+modulepar integer tsp_backoff_minimum := 3;
+
+type component SNTP_MTC extends Zephyr_Tester {}
+
+/* A request, kept with where it came from so that a reply can be addressed,
+ * and with the octets as they arrived so that the length can be checked.
+ */
+type record RequestSeen {
+	SNTP_Packet pkt,
+	octetstring raw,
+	charstring fromAddr,
+	integer fromPort
+}
+
+type record of RequestSeen RequestsSeen;
+
+function f_open() runs on SNTP_MTC
+{
+	f_udp_listen(tsp_tester_ipv4, tsp_sntp_port);
+}
+
+function f_abs(in integer p_value) return integer
+{
+	if (p_value < 0) {
+		return -p_value;
+	}
+
+	return p_value;
+}
+
+/* A timestamp on the wire counts from 1900, the clock the tests talk about
+ * counts from 1970.
+ */
+function f_ntp_seconds(in integer p_unix) return integer
+{
+	return p_unix + c_ntp_epoch_offset;
+}
+
+/* Wait for the next request. Fails the test case and stops it if the client
+ * has gone quiet or has sent something that is not a message at all, so
+ * callers can assume a value.
+ */
+function f_await_request() runs on SNTP_MTC return RequestSeen
+{
+	var ASP_RecvFrom v_recv := f_receive();
+	var bitstring v_bits;
+	var SNTP_Packet v_pkt;
+
+	if (lengthof(v_recv.msg) != c_sntp_packet_length) {
+		setverdict(fail, "a request is ", lengthof(v_recv.msg),
+			   " octets rather than ", c_sntp_packet_length);
+		stop;
+	}
+
+	v_bits := oct2bit(v_recv.msg);
+	if (decvalue(v_bits, v_pkt) != 0) {
+		setverdict(fail, "a request of the right length did not decode "&
+			   "as a message: ", v_recv.msg);
+		stop;
+	}
+
+	return { pkt := v_pkt,
+		 raw := v_recv.msg,
+		 fromAddr := v_recv.remName,
+		 fromPort := v_recv.remPort };
+}
+
+function f_await_requests(in integer p_count) runs on SNTP_MTC return RequestsSeen
+{
+	var RequestsSeen v_seen := {};
+
+	for (var integer i := 0; i < p_count; i := i + 1) {
+		v_seen[i] := f_await_request();
+	}
+
+	return v_seen;
+}
+
+/* Count what arrives over a window without looking at any of it. Used by the
+ * one test that is about how often the client asks rather than what it asks.
+ */
+function f_count_requests(in float p_window) runs on SNTP_MTC return integer
+{
+	var ASP_RecvFrom v_recv;
+	var integer v_count := 0;
+
+	t_guard.start(p_window);
+	alt {
+	[] pt.receive(ASP_RecvFrom:?) -> value v_recv {
+		v_count := v_count + 1;
+		repeat;
+	}
+	[] t_guard.timeout {
+	}
+	}
+
+	return v_count;
+}
+
+/* A reply that a client has every reason to believe: mode 4, a stratum, the
+ * version and poll interval copied back from the request, and the request's
+ * transmit timestamp returned as the originate timestamp. RFC 4330 section 6.
+ */
+function f_good_reply(in RequestSeen p_req, in integer p_unix) return SNTP_Packet
+{
+	var OCT4 v_seconds := int2oct(f_ntp_seconds(p_unix), 4);
+
+	return {
+		li := c_sntp_li_none,
+		vn := p_req.pkt.vn,
+		mode := c_sntp_mode_server,
+		stratum := c_sntp_stratum_primary,
+		poll := p_req.pkt.poll,
+		/* 2^-20 seconds, about a microsecond. */
+		precision := 'EC'O,
+		rootDelay := c_sntp_zero_word,
+		/* 16.16 fixed point seconds, so about four milliseconds. */
+		rootDispersion := '00000100'O,
+		/* A stratum one server names its reference clock here. "LOCL"
+		 * is the one for an undisciplined local clock, which is what
+		 * this is.
+		 */
+		referenceId := '4C4F434C'O,
+		referenceSeconds := v_seconds,
+		referenceFraction := c_sntp_zero_word,
+		originateSeconds := p_req.pkt.transmitSeconds,
+		originateFraction := p_req.pkt.transmitFraction,
+		receiveSeconds := v_seconds,
+		receiveFraction := c_sntp_zero_word,
+		transmitSeconds := v_seconds,
+		transmitFraction := c_sntp_zero_word
+	};
+}
+
+function f_send_reply(in RequestSeen p_req, in SNTP_Packet p_reply) runs on SNTP_MTC
+{
+	f_send_to(p_req.fromAddr, p_req.fromPort, bit2oct(encvalue(p_reply)));
+}
+
+function f_send_raw(in RequestSeen p_req, in octetstring p_msg) runs on SNTP_MTC
+{
+	f_send_to(p_req.fromAddr, p_req.fromPort, p_msg);
+}
+
+/* How far the clock that stamped a request is from a given time, in seconds. */
+function f_clock_distance(in RequestSeen p_req, in integer p_unix) return integer
+{
+	return f_abs(oct2int(p_req.pkt.transmitSeconds) - f_ntp_seconds(p_unix));
+}
+
+/* Answer the next request with p_unix and wait for the request after it, which
+ * has to carry p_unix for the reply to have been accepted.
+ *
+ * The request it returns is the one that came back, so a caller has something
+ * to answer without waiting again.
+ */
+function f_sync_to(in integer p_unix) runs on SNTP_MTC return RequestSeen
+{
+	var RequestSeen v_req := f_await_request();
+	var RequestSeen v_next;
+
+	f_send_reply(v_req, f_good_reply(v_req, p_unix));
+
+	v_next := f_await_request();
+	if (f_clock_distance(v_next, p_unix) > tsp_clock_tolerance) {
+		setverdict(fail, "the clock was not set from a reply that is "&
+			   "correct in every field, so the tests that follow "&
+			   "cannot tell an accepted reply from a rejected one");
+		stop;
+	}
+
+	return v_next;
+}
+
+/* The other half of the same idea: the clock must not have moved to a time
+ * that was offered in a reply the client should have thrown away.
+ */
+function f_expect_time_refused(in integer p_unix, in charstring p_why)
+runs on SNTP_MTC
+{
+	var RequestSeen v_next := f_await_request();
+
+	if (f_clock_distance(v_next, p_unix) <= tsp_clock_tolerance) {
+		setverdict(fail, "the clock was set from a reply that ", p_why);
+	} else {
+		setverdict(pass);
+	}
+}
+
+/* Every field of a request is fixed by RFC 4330 section 4, table 3, except the
+ * transmit timestamp, which is when the client sent it.
+ */
+function f_check_request_shape(in RequestSeen p_req) runs on SNTP_MTC
+{
+	if (p_req.pkt.li != c_sntp_li_none) {
+		setverdict(fail, "the leap indicator is ", p_req.pkt.li,
+			   " rather than 0");
+	}
+	if (p_req.pkt.vn < 1 or p_req.pkt.vn > 4) {
+		setverdict(fail, "the version is ", p_req.pkt.vn,
+			   ", which is outside 1 to 4");
+	}
+	if (p_req.pkt.mode != c_sntp_mode_client) {
+		setverdict(fail, "the mode is ", p_req.pkt.mode,
+			   " rather than 3, which is what a unicast request is");
+	}
+	if (p_req.pkt.stratum != 0) {
+		setverdict(fail, "the stratum is ", p_req.pkt.stratum,
+			   " rather than 0");
+	}
+	if (p_req.pkt.poll != 0) {
+		setverdict(fail, "the poll interval is ", p_req.pkt.poll,
+			   " rather than 0");
+	}
+	if (p_req.pkt.precision != '00'O) {
+		setverdict(fail, "the precision is ", p_req.pkt.precision,
+			   " rather than 0");
+	}
+	if (p_req.pkt.rootDelay != c_sntp_zero_word or
+	    p_req.pkt.rootDispersion != c_sntp_zero_word) {
+		setverdict(fail, "the root delay and dispersion belong to a "&
+			   "server and should be 0 in a request");
+	}
+	if (p_req.pkt.referenceId != c_sntp_zero_word or
+	    p_req.pkt.referenceSeconds != c_sntp_zero_word or
+	    p_req.pkt.referenceFraction != c_sntp_zero_word) {
+		setverdict(fail, "the reference identifier and timestamp "&
+			   "belong to a server and should be 0 in a request");
+	}
+	if (p_req.pkt.originateSeconds != c_sntp_zero_word or
+	    p_req.pkt.originateFraction != c_sntp_zero_word or
+	    p_req.pkt.receiveSeconds != c_sntp_zero_word or
+	    p_req.pkt.receiveFraction != c_sntp_zero_word) {
+		setverdict(fail, "the originate and receive timestamps are "&
+			   "filled in by the server and should be 0 in a request");
+	}
+	/* The transmit timestamp is what the reply is matched against, so a
+	 * request that leaves it at zero can be answered by anything.
+	 */
+	if (p_req.pkt.transmitSeconds == c_sntp_zero_word and
+	    p_req.pkt.transmitFraction == c_sntp_zero_word) {
+		setverdict(fail, "the transmit timestamp is 0, so nothing "&
+			   "identifies the reply that belongs to this request");
+	}
+}
+
+/* A request says what it is and leaves everything the server fills in alone.
+ * RFC 4330 section 4, table 3.
+ */
+testcase tc_request_is_well_formed() runs on SNTP_MTC
+{
+	var RequestSeen v_req;
+
+	f_open();
+	v_req := f_await_request();
+	f_check_request_shape(v_req);
+
+	setverdict(pass);
+	f_close();
+}
+
+/* The transmit timestamp is the only thing tying a reply to the request it
+ * answers, so a client that sent the same one twice could be given a stale
+ * reply and not know. RFC 4330 section 5, and RFC 8633 section 5.3 for why it
+ * is worth randomising rather than merely advancing.
+ */
+testcase tc_transmit_timestamp_varies() runs on SNTP_MTC
+{
+	var RequestsSeen v_seen;
+	var integer v_repeats := 0;
+
+	f_open();
+	v_seen := f_await_requests(tsp_request_sample);
+
+	for (var integer i := 1; i < lengthof(v_seen); i := i + 1) {
+		if (v_seen[i].pkt.transmitSeconds == v_seen[i - 1].pkt.transmitSeconds and
+		    v_seen[i].pkt.transmitFraction == v_seen[i - 1].pkt.transmitFraction) {
+			v_repeats := v_repeats + 1;
+		}
+	}
+
+	if (v_repeats > 0) {
+		setverdict(fail, v_repeats, " of ", lengthof(v_seen) - 1,
+			   " requests repeat the transmit timestamp of the one "&
+			   "before, so a reply to one would answer the other");
+	} else {
+		setverdict(pass);
+	}
+
+	f_close();
+}
+
+/* A request that goes unanswered has to be repeated, and sooner than the
+ * client would have asked again of its own accord. RFC 4330 section 5 asks for
+ * a backoff rather than a fixed rate, so this only counts what arrives.
+ */
+testcase tc_unanswered_request_is_repeated() runs on SNTP_MTC
+{
+	var RequestSeen v_first;
+	var integer v_count;
+
+	f_open();
+
+	/* Wait for the first one before starting the clock, so that the window
+	 * covers a query rather than the tail of the interval before it.
+	 */
+	v_first := f_await_request();
+	v_count := f_count_requests(tsp_backoff_window);
+
+	if (v_count < tsp_backoff_minimum) {
+		setverdict(fail, "only ", v_count, " further requests in ",
+			   tsp_backoff_window, "s after the one from port ",
+			   v_first.fromPort, ", so the client is waiting out "&
+			   "its whole interval rather than retransmitting");
+	} else {
+		setverdict(pass);
+	}
+
+	f_close();
+}
+
+/* The point of the whole thing: a reply that is right in every field is taken,
+ * and the time it carries becomes the client's time.
+ */
+testcase tc_reply_sets_the_clock() runs on SNTP_MTC
+{
+	var RequestSeen v_req;
+	var RequestSeen v_next;
+
+	f_open();
+
+	v_req := f_await_request();
+	f_send_reply(v_req, f_good_reply(v_req, tsp_time_set));
+
+	v_next := f_await_request();
+	if (f_clock_distance(v_next, tsp_time_set) > tsp_clock_tolerance) {
+		setverdict(fail, "the clock did not follow a reply that is "&
+			   "correct in every field: the next request is stamped ",
+			   oct2int(v_next.pkt.transmitSeconds), " rather than ",
+			   f_ntp_seconds(tsp_time_set));
+	} else {
+		setverdict(pass);
+	}
+
+	f_close();
+}
+
+/* The originate timestamp is the client's own transmit timestamp handed back.
+ * A reply that carries anything else is answering some other request, or no
+ * request at all, and taking the time from it would let an off path attacker
+ * set the clock without ever seeing what was asked. RFC 4330 section 5,
+ * sanity check 3.
+ */
+testcase tc_originate_timestamp_must_be_echoed() runs on SNTP_MTC
+{
+	var RequestSeen v_req;
+	var SNTP_Packet v_reply;
+
+	f_open();
+	v_req := f_sync_to(tsp_time_accepted);
+
+	v_reply := f_good_reply(v_req, tsp_time_originate);
+	/* One second out is enough: it is a different request. */
+	v_reply.originateSeconds :=
+		int2oct(oct2int(v_req.pkt.transmitSeconds) + 1, 4);
+
+	f_send_reply(v_req, v_reply);
+	f_expect_time_refused(tsp_time_originate,
+			      "does not carry back the transmit timestamp of "&
+			      "the request it claims to answer");
+
+	f_close();
+}
+
+/* A reply to a unicast request is mode 4. Mode 3 is another client asking, and
+ * whatever it is, it is not an answer. RFC 4330 section 4, table 3.
+ */
+testcase tc_reply_must_be_mode_server() runs on SNTP_MTC
+{
+	var RequestSeen v_req;
+	var SNTP_Packet v_reply;
+
+	f_open();
+	v_req := f_sync_to(tsp_time_accepted);
+
+	v_reply := f_good_reply(v_req, tsp_time_mode);
+	v_reply.mode := c_sntp_mode_client;
+
+	f_send_reply(v_req, v_reply);
+	f_expect_time_refused(tsp_time_mode, "is mode 3 rather than mode 4");
+
+	f_close();
+}
+
+/* Stratum 0 is not a stratum. It says the reply is a kiss-o'-death carrying a
+ * four character reason where the reference identifier goes, and no time at
+ * all. RFC 4330 section 8.
+ *
+ * That section also asks a client with no other server to back off rather than
+ * keep asking at the same rate. Nothing is asserted about that here: the
+ * backoff belongs to whatever drives the client rather than to the client
+ * itself.
+ */
+testcase tc_kiss_of_death_is_not_a_time_source() runs on SNTP_MTC
+{
+	var RequestSeen v_req;
+	var SNTP_Packet v_reply;
+
+	f_open();
+	v_req := f_sync_to(tsp_time_accepted);
+
+	v_reply := f_good_reply(v_req, tsp_time_kod);
+	v_reply.stratum := c_sntp_stratum_kod;
+	/* "RATE": asking too often. */
+	v_reply.referenceId := '52415445'O;
+
+	f_send_reply(v_req, v_reply);
+	f_expect_time_refused(tsp_time_kod,
+			      "is a kiss-o'-death packet rather than a time");
+
+	f_close();
+}
+
+/* A transmit timestamp of zero says the server has never had the time to
+ * give. RFC 4330 section 4, table 3, requires it to be nonzero in a reply.
+ */
+testcase tc_zero_transmit_timestamp_is_rejected() runs on SNTP_MTC
+{
+	var RequestSeen v_req;
+	var SNTP_Packet v_reply;
+	var RequestSeen v_next;
+
+	f_open();
+	v_req := f_sync_to(tsp_time_accepted);
+
+	v_reply := f_good_reply(v_req, tsp_time_accepted);
+	v_reply.transmitSeconds := c_sntp_zero_word;
+	v_reply.transmitFraction := c_sntp_zero_word;
+
+	f_send_reply(v_req, v_reply);
+
+	/* There is no offered time to look for here, so this one checks that
+	 * the clock stayed where the synchronisation left it. A client that
+	 * took the timestamp would have wound it back to 1900.
+	 */
+	v_next := f_await_request();
+	if (f_clock_distance(v_next, tsp_time_accepted) > tsp_clock_tolerance) {
+		setverdict(fail, "the clock moved after a reply whose transmit "&
+			   "timestamp is 0");
+	} else {
+		setverdict(pass);
+	}
+
+	f_close();
+}
+
+/* The message is a fixed length. Something shorter is not a reply that lost a
+ * few fields, it is not a reply, and reading the fields that did arrive would
+ * mean reading whatever the buffer held before.
+ */
+testcase tc_truncated_reply_is_rejected() runs on SNTP_MTC
+{
+	var RequestSeen v_req;
+	var octetstring v_msg;
+
+	f_open();
+	v_req := f_sync_to(tsp_time_accepted);
+
+	v_msg := bit2oct(encvalue(f_good_reply(v_req, tsp_time_truncated)));
+	/* Everything up to the transmit timestamp, which is where the time it
+	 * would be taken from lives.
+	 */
+	v_msg := substr(v_msg, 0, c_sntp_packet_length - 8);
+
+	f_send_raw(v_req, v_msg);
+	f_expect_time_refused(tsp_time_truncated,
+			      "is shorter than a message can be");
+
+	f_close();
+}
+
+control {
+	execute(tc_request_is_well_formed());
+	execute(tc_transmit_timestamp_varies());
+	execute(tc_unanswered_request_is_repeated());
+	execute(tc_reply_sets_the_clock());
+	execute(tc_originate_timestamp_must_be_echoed());
+	execute(tc_reply_must_be_mode_server());
+	execute(tc_kiss_of_death_is_not_a_time_source());
+	execute(tc_zero_transmit_timestamp_is_rejected());
+	execute(tc_truncated_reply_is_rejected());
+}
+
+}
