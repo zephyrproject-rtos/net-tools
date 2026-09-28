@@ -127,6 +127,13 @@ if [ "$ACTION" != stop ]; then
     echo "Creating $IFACE"
     ip tuntap add $IFACE mode tap $@
 
+    # Creating fails when the interface is already there, which is
+    # fine, so what matters is whether it exists afterwards.
+    if [ ! -d "/sys/class/net/$IFACE" ]; then
+	echo "Cannot create $IFACE" >&2
+	exit 1
+    fi
+
     # The idea is that the configuration file will setup
     # the IP addresses etc. for the created interface.
     . "$CONF_FILE" $IFACE
