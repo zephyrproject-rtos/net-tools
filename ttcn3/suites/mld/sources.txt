@@ -1,0 +1,6 @@
+# Module sources this suite needs on top of common/sources.txt,
+# relative to ../../modules.
+#
+# None. The suite writes its own IPv6 headers, because they carry an option
+# the IP module can only express as raw bytes, and its own MLD messages,
+# because the Titan project publishes no module for them.
