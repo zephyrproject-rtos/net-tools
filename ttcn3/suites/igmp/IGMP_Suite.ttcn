@@ -1,0 +1,779 @@
+/*
+ * SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Conformance tests for Zephyr as an IGMP host, RFC 3376 and RFC 2236.
+ *
+ * The tester plays the multicast router on the link. It works below IP, so it
+ * reads and writes frames on the interface that has no address on the Linux
+ * side and has to be run as root. The Titan project publishes no IGMP module,
+ * and the messages are a few fixed fields, so they are written out here; the
+ * IPv4 header is written out too, because every IGMP message carries the
+ * Router Alert option and the IP module knows nothing about options. Nothing
+ * is left of the IP module then, so the suite does not use it.
+ *
+ * The application joins one group, keeps it for a few seconds, leaves it,
+ * waits, and does it again for as long as it runs. So a test that wants to
+ * see a join or a leave waits for the next one rather than asking for it, and
+ * a test that needs the group to be joined while it works waits for a join
+ * report first and has the seconds that follow.
+ *
+ * The last three tests move the system under test into IGMPv2 and then IGMPv1
+ * compatibility mode, where it stays for minutes, and Twister starts the
+ * application once for the whole run. They run last, in that order, so that
+ * everything before them sees IGMPv3.
+ *
+ * The system under test is tests/net/conformance/igmp in the Zephyr tree.
+ */
+module IGMP_Suite {
+
+import from General_Types all;
+import from Ethernet_Port all;
+import from Inet_Checksum all;
+import from TCCConversion_Functions all;
+import from Zephyr_SUT all;
+
+/* Has to match the source_address the ethernet port is configured with, so
+ * that what the tester claims in a message and what it sends from agree.
+ */
+modulepar charstring tsp_tester_mac := "020000000002";
+
+/* The group the application joins and leaves. Has to match what the
+ * application is built with.
+ */
+modulepar charstring tsp_group := "239.0.2.1";
+
+/* A group nothing on the link has joined. */
+modulepar charstring tsp_other_group := "239.0.2.99";
+
+/* How long the application keeps the group before it leaves it. Tests that
+ * need the group joined while they work have this long after the join.
+ */
+modulepar float tsp_joined_for := 6.0;
+
+/* How many times a join is reported in total, the Robustness Variable of
+ * RFC 3376 8.1. Has to match what the application is built with.
+ */
+modulepar integer tsp_robustness := 2;
+
+const OCT2 c_ethertype_ipv4 := '0800'O;
+const integer c_proto_igmp := 2;
+
+/* IGMP message types, RFC 3376 4 and RFC 2236 2.1. */
+const integer c_type_query := 17;
+const integer c_type_report_v1 := 18;
+const integer c_type_report_v2 := 22;
+const integer c_type_leave_v2 := 23;
+const integer c_type_report_v3 := 34;
+
+/* Group record types, RFC 3376 4.2.12. */
+const integer c_record_is_include := 1;
+const integer c_record_is_exclude := 2;
+const integer c_record_to_include := 3;
+const integer c_record_to_exclude := 4;
+
+/* Where the messages go. RFC 3376 4.1.12 and 4.2.14, RFC 2236 9. */
+const charstring c_all_systems := "224.0.0.1";
+const charstring c_all_routers := "224.0.0.2";
+const charstring c_igmpv3_routers := "224.0.0.22";
+
+/* The Router Alert option every IGMP message carries, RFC 2113 2.1. */
+const octetstring c_router_alert := '94040000'O;
+
+/* Time in tenths of a second that a query gives for the answer, RFC 3376
+ * 4.1.1. Two seconds: long enough for a real delay to be visible, short
+ * enough that a test waits for nothing else meanwhile.
+ */
+const integer c_max_resp_code := 20;
+const float c_max_resp_time := 2.0;
+
+/* An IGMPv1 query says 0 and means ten seconds. RFC 3376 7.2.1. */
+const float c_v1_max_resp_time := 10.0;
+
+/* The Unsolicited Report Interval of IGMPv3, RFC 3376 8.11. */
+const float c_unsolicited_report_interval := 1.0;
+
+type component IGMP_MTC {
+	port Ethernet_PT pt;
+	timer t_guard;
+}
+
+/* One group record of an IGMPv3 report, RFC 3376 4.2.4. */
+type record IgmpRecord {
+	integer recordType,
+	OCT4 groupAddr,
+	integer sourceCount
+}
+
+type record of IgmpRecord IgmpRecords;
+
+/* An IGMP message with the parts of the frame around it that the tests have
+ * something to say about. The group and the records are what the message
+ * carries: a version 1 or 2 message has a group, a version 3 report has
+ * records.
+ */
+type record IgmpSeen {
+	integer msgType,
+	integer maxRespCode,
+	OCT4 groupAddr,
+	IgmpRecords records,
+	OCT4 ipSrc,
+	OCT4 ipDst,
+	integer ttl,
+	boolean routerAlert,
+	OCT6 ethDst
+}
+
+/*
+ * Addresses
+ */
+
+function f_mac(in charstring p_mac) return OCT6
+{
+	return str2oct(p_mac);
+}
+
+function f_ipv4(in charstring p_addr) return OCT4
+{
+	return f_convertIPAddrToBinary(p_addr);
+}
+
+/* An address as people write it, for the messages the tests give. */
+function f_dotted(in OCT4 p_addr) return charstring
+{
+	return int2str(oct2int(substr(p_addr, 0, 1))) & "." &
+	       int2str(oct2int(substr(p_addr, 1, 1))) & "." &
+	       int2str(oct2int(substr(p_addr, 2, 1))) & "." &
+	       int2str(oct2int(substr(p_addr, 3, 1)));
+}
+
+/* The ethernet address an IPv4 multicast address is sent to: 01:00:5e and the
+ * low 23 bits of the address. RFC 1112 6.4.
+ */
+function f_multicast_mac(in OCT4 p_addr) return OCT6
+{
+	return '01005E'O & int2oct(oct2int(substr(p_addr, 1, 1)) mod 128, 1) &
+	       substr(p_addr, 2, 2);
+}
+
+/*
+ * Building and sending
+ */
+
+/* The IGMP checksum covers the whole message with the checksum field zero.
+ * RFC 3376 4.1.2.
+ */
+function f_with_checksum(in octetstring p_message) return octetstring
+{
+	var octetstring v_zeroed := replace(p_message, 2, 2, '0000'O);
+
+	return replace(p_message, 2, 2, f_inet_checksum(v_zeroed));
+}
+
+/* A version 3 query, RFC 3376 4.1. A group of 0.0.0.0 makes it a General
+ * Query. No sources, S clear, QRV 2, QQIC 125 seconds.
+ */
+function f_query_v3(in OCT4 p_group, in integer p_max_resp_code := c_max_resp_code)
+return octetstring
+{
+	return f_with_checksum(int2oct(c_type_query, 1) & int2oct(p_max_resp_code, 1) &
+			       '0000'O & p_group & '02'O & '7D'O & '0000'O);
+}
+
+/* A version 2 query, RFC 2236 2: the same first eight octets and nothing
+ * more. A Max Resp Code of 0 makes it a version 1 query, RFC 3376 7.2.1.
+ */
+function f_query_v2(in OCT4 p_group, in integer p_max_resp_code := c_max_resp_code)
+return octetstring
+{
+	return f_with_checksum(int2oct(c_type_query, 1) & int2oct(p_max_resp_code, 1) &
+			       '0000'O & p_group);
+}
+
+/* A version 2 report for a group, as another member on the link would send
+ * it. RFC 2236 2.
+ */
+function f_report_v2(in OCT4 p_group) return octetstring
+{
+	return f_with_checksum(int2oct(c_type_report_v2, 1) & '00'O & '0000'O & p_group);
+}
+
+/* Put an IGMP message on the link in an IPv4 packet with TTL 1 and, unless
+ * told otherwise, the Router Alert option. The header is written out because
+ * the IP module's header record has no room for options.
+ */
+function f_send_igmp(in octetstring p_message, in OCT4 p_dst,
+		     in boolean p_router_alert := true) runs on IGMP_MTC
+{
+	var octetstring v_options := ''O;
+	var octetstring v_header;
+
+	if (p_router_alert) {
+		v_options := c_router_alert;
+	}
+
+	v_header := int2oct(64 + 5 + lengthof(v_options) / 4, 1) &	/* version, IHL */
+		    '00'O &						/* TOS */
+		    int2oct(20 + lengthof(v_options) + lengthof(p_message), 2) &
+		    '0000'O &						/* identification */
+		    '4000'O &						/* don't fragment */
+		    '01'O &						/* TTL, RFC 3376 4 */
+		    int2oct(c_proto_igmp, 1) &
+		    '0000'O &						/* checksum */
+		    f_ipv4(tsp_tester_ipv4) &
+		    p_dst &
+		    v_options;
+	v_header := replace(v_header, 10, 2, f_inet_checksum(v_header));
+
+	pt.send(Ethernet_Frame:{
+		destination := f_multicast_mac(p_dst),
+		source := f_mac(tsp_tester_mac),
+		etherType := c_ethertype_ipv4,
+		payload := v_header & p_message
+	});
+}
+
+/*
+ * Receiving
+ */
+
+/* Whether a frame carries an IGMP message from the system under test, and
+ * what of it the tests need. The header is read by hand for the same reason
+ * it is written by hand.
+ */
+function f_as_igmp(in Ethernet_Frame p_frame, out IgmpSeen p_seen) return boolean
+{
+	var octetstring v_ip := p_frame.payload;
+	var octetstring v_igmp;
+	var octetstring v_options;
+	var integer v_header_len;
+	var integer v_total_len;
+	var integer v_offset;
+	var integer v_count;
+
+	if (p_frame.etherType != c_ethertype_ipv4 or lengthof(v_ip) < 20) {
+		return false;
+	}
+
+	v_header_len := (oct2int(substr(v_ip, 0, 1)) mod 16) * 4;
+	v_total_len := oct2int(substr(v_ip, 2, 2));
+
+	if (oct2int(substr(v_ip, 9, 1)) != c_proto_igmp or
+	    v_header_len < 20 or v_total_len < v_header_len + 8 or
+	    lengthof(v_ip) < v_total_len) {
+		return false;
+	}
+
+	if (substr(v_ip, 12, 4) != f_ipv4(tsp_sut_ipv4)) {
+		return false;
+	}
+
+	v_options := substr(v_ip, 20, v_header_len - 20);
+	v_igmp := substr(v_ip, v_header_len, v_total_len - v_header_len);
+
+	p_seen := {
+		msgType := oct2int(substr(v_igmp, 0, 1)),
+		maxRespCode := oct2int(substr(v_igmp, 1, 1)),
+		groupAddr := substr(v_igmp, 4, 4),
+		records := {},
+		ipSrc := substr(v_ip, 12, 4),
+		ipDst := substr(v_ip, 16, 4),
+		ttl := oct2int(substr(v_ip, 8, 1)),
+		/* Where it sits among the options does not matter. */
+		routerAlert := lengthof(v_options) >= 4 and
+			       (v_options == c_router_alert or
+				substr(v_options, 0, 4) == c_router_alert or
+				substr(v_options, lengthof(v_options) - 4, 4) == c_router_alert),
+		ethDst := p_frame.destination
+	};
+
+	if (p_seen.msgType != c_type_report_v3) {
+		return true;
+	}
+
+	/* A version 3 report carries records rather than a group. RFC 3376 4.2. */
+	p_seen.groupAddr := '00000000'O;
+	v_count := oct2int(substr(v_igmp, 6, 2));
+	v_offset := 8;
+
+	for (var integer i := 0; i < v_count and v_offset + 8 <= lengthof(v_igmp); i := i + 1) {
+		var integer v_sources := oct2int(substr(v_igmp, v_offset + 2, 2));
+		var integer v_aux_len := oct2int(substr(v_igmp, v_offset + 1, 1));
+
+		p_seen.records[i] := {
+			recordType := oct2int(substr(v_igmp, v_offset, 1)),
+			groupAddr := substr(v_igmp, v_offset + 4, 4),
+			sourceCount := v_sources
+		};
+		v_offset := v_offset + 8 + 4 * v_sources + 4 * v_aux_len;
+	}
+
+	return true;
+}
+
+/* Wait for the next IGMP message from the system under test, ignoring
+ * everything else on the link. Fails the test case and stops it if none
+ * arrives, so callers can use the result without checking it first.
+ */
+function f_await_igmp(in float p_timeout := -1.0) runs on IGMP_MTC return IgmpSeen
+{
+	var Ethernet_Frame v_frame;
+	var IgmpSeen v_seen;
+	var float v_timeout := p_timeout;
+
+	if (v_timeout < 0.0) {
+		v_timeout := tsp_response_timeout;
+	}
+
+	t_guard.start(v_timeout);
+	alt {
+	[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+		if (f_as_igmp(v_frame, v_seen)) {
+			t_guard.stop;
+		} else {
+			repeat;
+		}
+	}
+	[] t_guard.timeout {
+		setverdict(fail, "no IGMP message within ", v_timeout, "s");
+		stop;
+	}
+	}
+
+	return v_seen;
+}
+
+/* Whether a version 3 report carries a record of the given type for the
+ * given group.
+ */
+function f_has_record(in IgmpSeen p_seen, in integer p_type, in OCT4 p_group)
+return boolean
+{
+	if (p_seen.msgType != c_type_report_v3) {
+		return false;
+	}
+
+	for (var integer i := 0; i < lengthof(p_seen.records); i := i + 1) {
+		if (p_seen.records[i].recordType == p_type and
+		    p_seen.records[i].groupAddr == p_group) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/* Wait for a version 3 report carrying a record of the given type for the
+ * group under test, letting everything else past.
+ */
+function f_await_record(in integer p_type, in float p_timeout := -1.0)
+runs on IGMP_MTC return IgmpSeen
+{
+	var float v_timeout := p_timeout;
+	var IgmpSeen v_seen;
+
+	if (v_timeout < 0.0) {
+		v_timeout := tsp_response_timeout;
+	}
+
+	t_guard.start(v_timeout);
+	while (true) {
+		var Ethernet_Frame v_frame;
+
+		alt {
+		[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+			if (f_as_igmp(v_frame, v_seen) and
+			    f_has_record(v_seen, p_type, f_ipv4(tsp_group))) {
+				t_guard.stop;
+				return v_seen;
+			}
+		}
+		[] t_guard.timeout {
+			setverdict(fail, "no report with a type ", p_type,
+				   " record for the group within ", v_timeout, "s");
+			stop;
+		}
+		}
+	}
+
+	return v_seen;
+}
+
+/* Wait for a version 1 or 2 message of the given type for the group under
+ * test, letting everything else past.
+ */
+function f_await_type(in integer p_type, in float p_timeout := -1.0)
+runs on IGMP_MTC return IgmpSeen
+{
+	var float v_timeout := p_timeout;
+	var IgmpSeen v_seen;
+
+	if (v_timeout < 0.0) {
+		v_timeout := tsp_response_timeout;
+	}
+
+	t_guard.start(v_timeout);
+	while (true) {
+		var Ethernet_Frame v_frame;
+
+		alt {
+		[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+			if (f_as_igmp(v_frame, v_seen) and v_seen.msgType == p_type and
+			    v_seen.groupAddr == f_ipv4(tsp_group)) {
+				t_guard.stop;
+				return v_seen;
+			}
+		}
+		[] t_guard.timeout {
+			setverdict(fail, "no message of type ", p_type,
+				   " for the group within ", v_timeout, "s");
+			stop;
+		}
+		}
+	}
+
+	return v_seen;
+}
+
+/* Require that no report of the current state of any group arrives within the
+ * silence timeout. Reports of a state change are let past: the application
+ * keeps joining and leaving whatever the tester does, and those are not an
+ * answer to anything.
+ */
+function f_expect_no_current_state(in charstring p_why) runs on IGMP_MTC
+{
+	var Ethernet_Frame v_frame;
+	var IgmpSeen v_seen;
+
+	t_guard.start(tsp_silence_timeout);
+	alt {
+	[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+		if (f_as_igmp(v_frame, v_seen) and
+		    (f_has_record(v_seen, c_record_is_include, f_ipv4(tsp_group)) or
+		     f_has_record(v_seen, c_record_is_exclude, f_ipv4(tsp_group)) or
+		     f_has_record(v_seen, c_record_is_include, f_ipv4(tsp_other_group)) or
+		     f_has_record(v_seen, c_record_is_exclude, f_ipv4(tsp_other_group)) or
+		     v_seen.msgType == c_type_report_v2 or
+		     v_seen.msgType == c_type_report_v1)) {
+			t_guard.stop;
+			setverdict(fail, "answered when it should have stayed quiet: ", p_why);
+		} else {
+			repeat;
+		}
+	}
+	[] t_guard.timeout {
+		setverdict(pass);
+	}
+	}
+}
+
+/* The next join, known to be a fresh one: the report of a leave comes first,
+ * so that the report which follows is the first of a join and not the repeat
+ * of one that was already under way when the test started looking.
+ */
+function f_await_fresh_join() runs on IGMP_MTC return IgmpSeen
+{
+	f_await_record(c_record_to_include);
+
+	return f_await_record(c_record_to_exclude);
+}
+
+/* Everything a version 3 report has to get right on the outside, whatever it
+ * carries. RFC 3376 4, 4.2.14.
+ */
+function f_check_v3_report_shape(in IgmpSeen p_seen) runs on IGMP_MTC
+{
+	if (p_seen.ipDst != f_ipv4(c_igmpv3_routers)) {
+		setverdict(fail, "the report went to ", f_dotted(p_seen.ipDst),
+			   " rather than to ", c_igmpv3_routers);
+	}
+	if (p_seen.ethDst != f_multicast_mac(f_ipv4(c_igmpv3_routers))) {
+		setverdict(fail, "the report went to ethernet address ", p_seen.ethDst,
+			   " rather than the one that belongs to ", c_igmpv3_routers);
+	}
+	if (p_seen.ttl != 1) {
+		setverdict(fail, "the report left with TTL ", p_seen.ttl, " rather than 1");
+	}
+	if (not p_seen.routerAlert) {
+		setverdict(fail, "the report carries no Router Alert option");
+	}
+}
+
+/* The same for a version 1 or 2 message, which goes where the version says:
+ * a report to the group, a leave to all routers. RFC 2236 9.
+ */
+function f_check_v2_shape(in IgmpSeen p_seen, in charstring p_dst) runs on IGMP_MTC
+{
+	if (p_seen.ipDst != f_ipv4(p_dst)) {
+		setverdict(fail, "the message went to ", f_dotted(p_seen.ipDst),
+			   " rather than to ", p_dst);
+	}
+	if (p_seen.ttl != 1) {
+		setverdict(fail, "the message left with TTL ", p_seen.ttl, " rather than 1");
+	}
+	if (not p_seen.routerAlert) {
+		setverdict(fail, "the message carries no Router Alert option");
+	}
+}
+
+function f_open() runs on IGMP_MTC
+{
+	map(mtc:pt, system:pt);
+}
+
+function f_close() runs on IGMP_MTC
+{
+	unmap(mtc:pt, system:pt);
+}
+
+/*
+ * IGMPv3
+ */
+
+/* Joining a group is reported at once: a State-Change Report to the IGMPv3
+ * routers, carrying a change to EXCLUDE mode with no sources for the group.
+ * RFC 3376 5.1, 4.2.12, 4.2.14.
+ */
+testcase tc_join_is_reported() runs on IGMP_MTC
+{
+	var IgmpSeen v_seen;
+
+	f_open();
+
+	v_seen := f_await_fresh_join();
+	f_check_v3_report_shape(v_seen);
+
+	for (var integer i := 0; i < lengthof(v_seen.records); i := i + 1) {
+		if (v_seen.records[i].groupAddr == f_ipv4(tsp_group) and
+		    v_seen.records[i].sourceCount != 0) {
+			setverdict(fail, "the record for the group names ",
+				   v_seen.records[i].sourceCount,
+				   " sources where a join of the whole group names none");
+		}
+		if (v_seen.records[i].groupAddr == f_ipv4(c_all_systems)) {
+			setverdict(fail, "the report mentions ", c_all_systems,
+				   ", which is never reported");
+		}
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/* The report of a join is sent Robustness Variable times in all, the repeats
+ * at random points within the Unsolicited Report Interval, so that one lost
+ * report does not leave the group unregistered. RFC 3376 5.1, 8.1, 8.11.
+ */
+testcase tc_join_report_is_repeated() runs on IGMP_MTC
+{
+	var Ethernet_Frame v_frame;
+	var IgmpSeen v_seen;
+
+	f_open();
+
+	f_await_fresh_join();
+
+	/* Half a second past the interval, for the delay on the link. */
+	for (var integer i := 1; i < tsp_robustness; i := i + 1) {
+		f_await_record(c_record_to_exclude, c_unsolicited_report_interval + 0.5);
+	}
+
+	/* And then no more of them. */
+	t_guard.start(c_unsolicited_report_interval + 0.5);
+	alt {
+	[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+		if (f_as_igmp(v_frame, v_seen) and
+		    f_has_record(v_seen, c_record_to_exclude, f_ipv4(tsp_group))) {
+			t_guard.stop;
+			setverdict(fail, "the join was reported more than ",
+				   tsp_robustness, " times");
+		} else {
+			repeat;
+		}
+	}
+	[] t_guard.timeout {
+		setverdict(pass);
+	}
+	}
+
+	f_close();
+}
+
+/* A General Query is answered within its Max Resp Time with a Current-State
+ * Report of every group the interface has joined, and never with the all
+ * systems group. RFC 3376 5.2, 4.2.12.
+ */
+testcase tc_general_query_is_answered() runs on IGMP_MTC
+{
+	var IgmpSeen v_seen;
+
+	f_open();
+
+	f_await_fresh_join();
+	f_send_igmp(f_query_v3('00000000'O), f_ipv4(c_all_systems));
+
+	v_seen := f_await_record(c_record_is_exclude, c_max_resp_time + 0.5);
+	f_check_v3_report_shape(v_seen);
+
+	for (var integer i := 0; i < lengthof(v_seen.records); i := i + 1) {
+		if (v_seen.records[i].groupAddr == f_ipv4(c_all_systems)) {
+			setverdict(fail, "the answer reports ", c_all_systems,
+				   ", which is never reported");
+		}
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/* A Group-Specific Query is answered by a member of that group, with the
+ * state of that group alone, and by nobody else. RFC 3376 5.2.
+ */
+testcase tc_group_specific_query_is_answered_by_members() runs on IGMP_MTC
+{
+	var IgmpSeen v_seen;
+
+	f_open();
+
+	f_await_fresh_join();
+	f_send_igmp(f_query_v3(f_ipv4(tsp_group)), f_ipv4(tsp_group));
+
+	v_seen := f_await_record(c_record_is_exclude, c_max_resp_time + 0.5);
+	f_check_v3_report_shape(v_seen);
+
+	if (lengthof(v_seen.records) != 1) {
+		setverdict(fail, "the answer to a query for one group carries ",
+			   lengthof(v_seen.records), " records");
+	}
+
+	/* The same question about a group it has not joined. */
+	f_send_igmp(f_query_v3(f_ipv4(tsp_other_group)), f_ipv4(tsp_other_group));
+	f_expect_no_current_state("a query for a group it has not joined");
+
+	f_close();
+}
+
+/* A query without the Router Alert option may have come from off the link,
+ * and is ignored. RFC 3376 9; CONFIG_NET_IPV4_IGMP_REQUIRE_ROUTER_ALERT.
+ */
+testcase tc_query_without_router_alert_is_ignored() runs on IGMP_MTC
+{
+	f_open();
+
+	f_await_fresh_join();
+	f_send_igmp(f_query_v3(f_ipv4(tsp_group)), f_ipv4(tsp_group), false);
+
+	f_expect_no_current_state("a query without the Router Alert option");
+
+	f_close();
+}
+
+/* Leaving a group is reported as a change to INCLUDE mode with no sources,
+ * which is the non-existent state. RFC 3376 5.1.
+ */
+testcase tc_leave_is_reported() runs on IGMP_MTC
+{
+	var IgmpSeen v_seen;
+
+	f_open();
+
+	v_seen := f_await_record(c_record_to_include);
+	f_check_v3_report_shape(v_seen);
+
+	for (var integer i := 0; i < lengthof(v_seen.records); i := i + 1) {
+		if (v_seen.records[i].groupAddr == f_ipv4(tsp_group) and
+		    v_seen.records[i].sourceCount != 0) {
+			setverdict(fail, "the record for the group names ",
+				   v_seen.records[i].sourceCount,
+				   " sources where a leave names none");
+		}
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/*
+ * Older queriers. From here on the system under test is left in a
+ * compatibility mode, see the top of the file.
+ */
+
+/* Hearing an IGMPv2 General Query puts the host in IGMPv2 compatibility
+ * mode: it answers that query with a version 2 report to the group, and
+ * reports its next join and leave in version 2 as well, the leave to all
+ * routers. RFC 3376 7.2.1, RFC 2236 3 and 9.
+ */
+testcase tc_v2_querier_moves_the_host_to_v2() runs on IGMP_MTC
+{
+	var IgmpSeen v_seen;
+
+	f_open();
+
+	f_await_fresh_join();
+	f_send_igmp(f_query_v2('00000000'O), f_ipv4(c_all_systems));
+
+	v_seen := f_await_type(c_type_report_v2, c_max_resp_time + 0.5);
+	f_check_v2_shape(v_seen, tsp_group);
+
+	v_seen := f_await_type(c_type_leave_v2);
+	f_check_v2_shape(v_seen, c_all_routers);
+
+	v_seen := f_await_type(c_type_report_v2);
+	f_check_v2_shape(v_seen, tsp_group);
+
+	setverdict(pass);
+	f_close();
+}
+
+/* In IGMPv2 mode a report heard from another member of the group stands for
+ * this host's own: a pending answer to a query is dropped, and so is the
+ * repeat of a join. RFC 2236 3. IGMPv3 has no such suppression, RFC 3376
+ * 7.2.2, which is why this runs in version 2 mode.
+ */
+testcase tc_v2_report_heard_suppresses_the_answer() runs on IGMP_MTC
+{
+	f_open();
+
+	f_await_type(c_type_report_v2);
+	f_send_igmp(f_query_v2(f_ipv4(tsp_group)), f_ipv4(tsp_group));
+	f_send_igmp(f_report_v2(f_ipv4(tsp_group)), f_ipv4(tsp_group));
+
+	f_expect_no_current_state("a query whose answer another member has already given");
+
+	f_close();
+}
+
+/* An IGMPv1 querier says so with a Max Resp Code of 0, which means ten
+ * seconds, and moves the host to IGMPv1 compatibility mode: the answer is a
+ * version 1 report to the group. RFC 3376 7.2.1.
+ */
+testcase tc_v1_querier_moves_the_host_to_v1() runs on IGMP_MTC
+{
+	var IgmpSeen v_seen;
+
+	f_open();
+
+	f_await_type(c_type_report_v2);
+	f_send_igmp(f_query_v2('00000000'O, 0), f_ipv4(c_all_systems));
+
+	v_seen := f_await_type(c_type_report_v1, c_v1_max_resp_time + 0.5);
+	f_check_v2_shape(v_seen, tsp_group);
+
+	setverdict(pass);
+	f_close();
+}
+
+control {
+	execute(tc_join_is_reported());
+	execute(tc_join_report_is_repeated());
+	execute(tc_general_query_is_answered());
+	execute(tc_group_specific_query_is_answered_by_members());
+	execute(tc_query_without_router_alert_is_ignored());
+	execute(tc_leave_is_reported());
+	execute(tc_v2_querier_moves_the_host_to_v2());
+	execute(tc_v2_report_heard_suppresses_the_answer());
+	execute(tc_v1_querier_moves_the_host_to_v1());
+}
+
+}

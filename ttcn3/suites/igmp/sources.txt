@@ -1,0 +1,6 @@
+# Module sources this suite needs on top of common/sources.txt,
+# relative to ../../modules.
+#
+# None. The suite writes its own IPv4 headers, because they carry an option
+# the IP module cannot express, and its own IGMP messages, because the Titan
+# project publishes no IGMP module.

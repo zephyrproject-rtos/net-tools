@@ -1,0 +1,39 @@
+/*
+ * SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* The Internet checksum of RFC 1071, for the suites that write their own
+ * headers. The IP module has a checksum function, but it takes the length of
+ * what it sums from what it assumes is an IPv4 header, so it can only be used
+ * on one of those. This one sums exactly what it is given.
+ */
+module Inet_Checksum {
+
+import from General_Types all;
+
+/* The one's complement of the one's complement sum of p_data taken 16 bits
+ * at a time, padded with a zero octet when its length is odd. For an ICMPv6
+ * message, p_data is the pseudo header of RFC 8200 4 followed by the message.
+ */
+function f_inet_checksum(in octetstring p_data) return OCT2
+{
+	var octetstring v_data := p_data;
+	var integer v_sum := 0;
+
+	if (lengthof(v_data) mod 2 == 1) {
+		v_data := v_data & '00'O;
+	}
+
+	for (var integer i := 0; i < lengthof(v_data); i := i + 2) {
+		v_sum := v_sum + oct2int(substr(v_data, i, 2));
+	}
+
+	while (v_sum > 65535) {
+		v_sum := (v_sum mod 65536) + (v_sum / 65536);
+	}
+
+	return int2oct(65535 - v_sum, 2);
+}
+
+}

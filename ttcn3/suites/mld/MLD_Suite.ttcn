@@ -1,0 +1,840 @@
+/*
+ * SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Conformance tests for Zephyr as a Multicast Listener Discovery listener,
+ * RFC 3810 and RFC 2710.
+ *
+ * The tester plays the multicast router on the link. It works below IP, so it
+ * reads and writes frames on the interface that has no address on the Linux
+ * side and has to be run as root. The Titan project publishes no MLD module,
+ * and the messages are a few fixed fields, so they are written out here; the
+ * IPv6 header is written out too, because every MLD message carries the
+ * Router Alert option in a Hop-by-Hop Options header and the IP module can
+ * only carry that as raw bytes, which leaves nothing for it to do.
+ *
+ * The application joins one multicast address, keeps it for a few seconds,
+ * leaves it, waits, and does it again for as long as it runs. So a test that
+ * wants to see a join or a leave waits for the next one rather than asking
+ * for it, and a test that needs the address joined while it works waits for a
+ * join report first and has the seconds that follow. The node also listens to
+ * its solicited-node addresses and reports them along with the address under
+ * test; the tests look at the records for the address under test and let the
+ * rest past.
+ *
+ * The last two tests move the system under test into MLDv1 compatibility
+ * mode, where it stays for minutes, and Twister starts the application once
+ * for the whole run. They run last, in that order, so that everything before
+ * them sees MLDv2.
+ *
+ * The system under test is tests/net/conformance/mld in the Zephyr tree.
+ */
+module MLD_Suite {
+
+import from General_Types all;
+import from Ethernet_Port all;
+import from Inet_Checksum all;
+import from TCCConversion_Functions all;
+import from Zephyr_SUT all;
+
+/* Has to match the source_address the ethernet port is configured with, so
+ * that what the tester claims in a message and what it sends from agree.
+ */
+modulepar charstring tsp_tester_mac := "020000000002";
+
+/* The link-local address the tester's queries come from. A query has to come
+ * from one, RFC 3810 5.1.14.
+ */
+modulepar charstring tsp_tester_linklocal := "fe80::2";
+
+/* The multicast address the application joins and leaves. Has to match what
+ * the application is built with.
+ */
+modulepar charstring tsp_group := "ff05::db8:1";
+
+/* A multicast address nothing on the link listens to. */
+modulepar charstring tsp_other_group := "ff05::db8:99";
+
+/* How long the application keeps the address before it leaves it. Tests that
+ * need the address joined while they work have this long after the join.
+ */
+modulepar float tsp_joined_for := 6.0;
+
+/* How many times a join is reported in total, the Robustness Variable of
+ * RFC 3810 9.1. Has to match what the application is built with.
+ */
+modulepar integer tsp_robustness := 2;
+
+const OCT2 c_ethertype_ipv6 := '86DD'O;
+const integer c_next_hop_by_hop := 0;
+const integer c_next_icmpv6 := 58;
+
+/* MLD message types, RFC 3810 5 and RFC 2710 3. */
+const integer c_type_query := 130;
+const integer c_type_report_v1 := 131;
+const integer c_type_done_v1 := 132;
+const integer c_type_report_v2 := 143;
+
+/* Multicast address record types, RFC 3810 5.2.12. */
+const integer c_record_is_include := 1;
+const integer c_record_is_exclude := 2;
+const integer c_record_to_include := 3;
+const integer c_record_to_exclude := 4;
+
+/* Where the messages go. RFC 3810 5.1.15 and 5.2.14, RFC 2710 8. */
+const charstring c_all_nodes := "ff02::1";
+const charstring c_all_routers := "ff02::2";
+const charstring c_mldv2_routers := "ff02::16";
+
+/* The Hop-by-Hop Options header every MLD message carries: ICMPv6 next, no
+ * further length, the Router Alert option for MLD, and padding to eight
+ * octets. RFC 3810 5, RFC 2711 2.1, RFC 8200 4.3.
+ */
+const octetstring c_hop_by_hop_router_alert := '3A00050200000100'O;
+
+/* Time in milliseconds that a query gives for the answer, RFC 3810 5.1.3.
+ * Two seconds: long enough for a real delay to be visible, short enough that
+ * a test waits for nothing else meanwhile.
+ */
+const integer c_max_resp_code := 2000;
+const float c_max_resp_delay := 2.0;
+
+/* The Unsolicited Report Interval of MLDv2, RFC 3810 9.11. */
+const float c_unsolicited_report_interval := 1.0;
+
+type component MLD_MTC {
+	port Ethernet_PT pt;
+	timer t_guard;
+}
+
+/* One multicast address record of an MLDv2 report, RFC 3810 5.2.4. */
+type record MldRecord {
+	integer recordType,
+	OCT16 mcastAddr,
+	integer sourceCount
+}
+
+type record of MldRecord MldRecords;
+
+/* An MLD message with the parts of the frame around it that the tests have
+ * something to say about. The address and the records are what the message
+ * carries: a version 1 message has an address, a version 2 report has
+ * records.
+ */
+type record MldSeen {
+	integer msgType,
+	integer maxRespCode,
+	OCT16 mcastAddr,
+	MldRecords records,
+	OCT16 ipSrc,
+	OCT16 ipDst,
+	integer hopLimit,
+	boolean routerAlert,
+	boolean checksumOk,
+	OCT6 ethDst
+}
+
+/*
+ * Addresses
+ */
+
+function f_mac(in charstring p_mac) return OCT6
+{
+	return str2oct(p_mac);
+}
+
+function f_ipv6(in charstring p_addr) return OCT16
+{
+	return f_convertIPAddrToBinary(p_addr);
+}
+
+/* The ethernet address an IPv6 multicast address is sent to: 33:33 and the
+ * low 32 bits of the address. RFC 2464 7.
+ */
+function f_multicast_mac(in OCT16 p_addr) return OCT6
+{
+	return '3333'O & substr(p_addr, 12, 4);
+}
+
+/* Whether an address is in fe80::/64, which is where every MLD message comes
+ * from once the node has such an address. RFC 3810 5.1.14 and 5.2.13.
+ */
+function f_is_link_local(in OCT16 p_addr) return boolean
+{
+	return substr(p_addr, 0, 8) == 'FE80000000000000'O;
+}
+
+/*
+ * Building and sending
+ */
+
+/* The ICMPv6 checksum: RFC 1071 over the pseudo header of RFC 8200 8.1 and
+ * the message, with the checksum field zero. RFC 4443 2.3.
+ */
+function f_with_checksum(in OCT16 p_src, in OCT16 p_dst, in octetstring p_message)
+return octetstring
+{
+	var octetstring v_zeroed := replace(p_message, 2, 2, '0000'O);
+	var octetstring v_pseudo := p_src & p_dst & int2oct(lengthof(p_message), 4) &
+				    '000000'O & int2oct(c_next_icmpv6, 1);
+
+	return replace(p_message, 2, 2, f_inet_checksum(v_pseudo & v_zeroed));
+}
+
+/* A version 2 query, RFC 3810 5.1, checksum still zero. An address of :: makes
+ * it a General Query. No sources, S clear, QRV 2, QQIC 125 seconds.
+ */
+function f_query_v2(in OCT16 p_addr, in integer p_max_resp_code := c_max_resp_code)
+return octetstring
+{
+	return int2oct(c_type_query, 1) & '00'O & '0000'O & int2oct(p_max_resp_code, 2) &
+	       '0000'O & p_addr & '02'O & '7D'O & '0000'O;
+}
+
+/* A version 1 query, RFC 2710 3: the same first 24 octets and nothing more,
+ * which is what tells the versions apart, RFC 3810 8.1.
+ */
+function f_query_v1(in OCT16 p_addr, in integer p_max_resp_delay := c_max_resp_code)
+return octetstring
+{
+	return int2oct(c_type_query, 1) & '00'O & '0000'O & int2oct(p_max_resp_delay, 2) &
+	       '0000'O & p_addr;
+}
+
+/* A version 1 report for an address, as another listener on the link would
+ * send it. RFC 2710 3.
+ */
+function f_report_v1(in OCT16 p_addr) return octetstring
+{
+	return int2oct(c_type_report_v1, 1) & '00'O & '0000'O & '0000'O & '0000'O & p_addr;
+}
+
+/* Put an MLD message on the link in an IPv6 packet from the tester's
+ * link-local address, with hop limit 1 and the Router Alert option, unless
+ * told otherwise. The header is written out because the IP module can only
+ * carry the option as raw bytes.
+ */
+function f_send_mld(in octetstring p_message, in OCT16 p_dst,
+		    in boolean p_router_alert := true, in integer p_hop_limit := 1,
+		    in charstring p_src := "") runs on MLD_MTC
+{
+	var charstring v_src_text := p_src;
+	var octetstring v_ext := ''O;
+	var integer v_next := c_next_icmpv6;
+	var octetstring v_header;
+	var octetstring v_message;
+	var OCT16 v_src;
+
+	if (v_src_text == "") {
+		v_src_text := tsp_tester_linklocal;
+	}
+	v_src := f_ipv6(v_src_text);
+
+	if (p_router_alert) {
+		v_ext := c_hop_by_hop_router_alert;
+		v_next := c_next_hop_by_hop;
+	}
+
+	v_message := f_with_checksum(v_src, p_dst, p_message);
+
+	v_header := '60000000'O &					/* version, class, flow */
+		    int2oct(lengthof(v_ext) + lengthof(v_message), 2) &	/* payload length */
+		    int2oct(v_next, 1) &
+		    int2oct(p_hop_limit, 1) &
+		    v_src &
+		    p_dst;
+
+	pt.send(Ethernet_Frame:{
+		destination := f_multicast_mac(p_dst),
+		source := f_mac(tsp_tester_mac),
+		etherType := c_ethertype_ipv6,
+		payload := v_header & v_ext & v_message
+	});
+}
+
+/*
+ * Receiving
+ */
+
+/* Whether the options of a Hop-by-Hop header include the Router Alert option
+ * for MLD, wherever it sits among them. RFC 8200 4.2, RFC 2711 2.1.
+ */
+function f_has_router_alert(in octetstring p_options) return boolean
+{
+	var integer i := 0;
+
+	while (i < lengthof(p_options)) {
+		var integer v_type := oct2int(substr(p_options, i, 1));
+		var integer v_len;
+
+		if (v_type == 0) {			/* Pad1 */
+			i := i + 1;
+			continue;
+		}
+		if (i + 2 > lengthof(p_options)) {
+			return false;
+		}
+		v_len := oct2int(substr(p_options, i + 1, 1));
+		if (i + 2 + v_len > lengthof(p_options)) {
+			return false;
+		}
+		if (v_type == 5 and v_len == 2 and substr(p_options, i + 2, 2) == '0000'O) {
+			return true;
+		}
+		i := i + 2 + v_len;
+	}
+
+	return false;
+}
+
+/* Whether a frame carries an MLD message from the system under test, and
+ * what of it the tests need. The header is read by hand for the same reason
+ * it is written by hand.
+ */
+function f_as_mld(in Ethernet_Frame p_frame, out MldSeen p_seen) return boolean
+{
+	var octetstring v_ip := p_frame.payload;
+	var octetstring v_icmp;
+	var octetstring v_pseudo;
+	var integer v_payload_len;
+	var integer v_next;
+	var integer v_offset := 40;
+	var boolean v_router_alert := false;
+	var integer v_count;
+
+	if (p_frame.etherType != c_ethertype_ipv6 or p_frame.source == f_mac(tsp_tester_mac) or
+	    lengthof(v_ip) < 40 or oct2int(substr(v_ip, 0, 1)) / 16 != 6) {
+		return false;
+	}
+
+	v_payload_len := oct2int(substr(v_ip, 4, 2));
+	v_next := oct2int(substr(v_ip, 6, 1));
+
+	if (lengthof(v_ip) < 40 + v_payload_len) {
+		return false;
+	}
+
+	if (v_next == c_next_hop_by_hop) {
+		var integer v_ext_len;
+
+		if (v_payload_len < 8) {
+			return false;
+		}
+		v_ext_len := (oct2int(substr(v_ip, 41, 1)) + 1) * 8;
+		if (v_ext_len > v_payload_len) {
+			return false;
+		}
+		v_router_alert := f_has_router_alert(substr(v_ip, 42, v_ext_len - 2));
+		v_next := oct2int(substr(v_ip, 40, 1));
+		v_offset := 40 + v_ext_len;
+	}
+
+	if (v_next != c_next_icmpv6 or 40 + v_payload_len - v_offset < 24) {
+		return false;
+	}
+
+	v_icmp := substr(v_ip, v_offset, 40 + v_payload_len - v_offset);
+
+	p_seen := {
+		msgType := oct2int(substr(v_icmp, 0, 1)),
+		maxRespCode := oct2int(substr(v_icmp, 4, 2)),
+		mcastAddr := substr(v_icmp, 8, 16),
+		records := {},
+		ipSrc := substr(v_ip, 8, 16),
+		ipDst := substr(v_ip, 24, 16),
+		hopLimit := oct2int(substr(v_ip, 7, 1)),
+		routerAlert := v_router_alert,
+		checksumOk := false,
+		ethDst := p_frame.destination
+	};
+
+	if (p_seen.msgType != c_type_query and p_seen.msgType != c_type_report_v1 and
+	    p_seen.msgType != c_type_done_v1 and p_seen.msgType != c_type_report_v2) {
+		return false;
+	}
+
+	/* Summing the message with its checksum in place gives zero when the
+	 * checksum is right. RFC 1071 1.
+	 */
+	v_pseudo := p_seen.ipSrc & p_seen.ipDst & int2oct(lengthof(v_icmp), 4) & '000000'O &
+		    int2oct(c_next_icmpv6, 1);
+	p_seen.checksumOk := f_inet_checksum(v_pseudo & v_icmp) == '0000'O;
+
+	if (p_seen.msgType != c_type_report_v2) {
+		return true;
+	}
+
+	/* A version 2 report carries records rather than an address. RFC 3810 5.2. */
+	p_seen.mcastAddr := '00000000000000000000000000000000'O;
+	v_count := oct2int(substr(v_icmp, 6, 2));
+	v_offset := 8;
+
+	for (var integer i := 0; i < v_count and v_offset + 20 <= lengthof(v_icmp); i := i + 1) {
+		var integer v_aux_len := oct2int(substr(v_icmp, v_offset + 1, 1));
+		var integer v_sources := oct2int(substr(v_icmp, v_offset + 2, 2));
+
+		p_seen.records[i] := {
+			recordType := oct2int(substr(v_icmp, v_offset, 1)),
+			mcastAddr := substr(v_icmp, v_offset + 4, 16),
+			sourceCount := v_sources
+		};
+		v_offset := v_offset + 20 + 16 * v_sources + 4 * v_aux_len;
+	}
+
+	return true;
+}
+
+/* Whether a version 2 report carries a record of the given type for the
+ * given address.
+ */
+function f_has_record(in MldSeen p_seen, in integer p_type, in OCT16 p_addr)
+return boolean
+{
+	if (p_seen.msgType != c_type_report_v2) {
+		return false;
+	}
+
+	for (var integer i := 0; i < lengthof(p_seen.records); i := i + 1) {
+		if (p_seen.records[i].recordType == p_type and
+		    p_seen.records[i].mcastAddr == p_addr) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/* Wait for a version 2 report carrying a record of the given type for the
+ * address under test, letting everything else past. Fails the test case and
+ * stops it if none arrives, so callers can use the result without checking
+ * it first.
+ */
+function f_await_record(in integer p_type, in float p_timeout := -1.0)
+runs on MLD_MTC return MldSeen
+{
+	var float v_timeout := p_timeout;
+	var MldSeen v_seen;
+
+	if (v_timeout < 0.0) {
+		v_timeout := tsp_response_timeout;
+	}
+
+	t_guard.start(v_timeout);
+	while (true) {
+		var Ethernet_Frame v_frame;
+
+		alt {
+		[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+			if (f_as_mld(v_frame, v_seen) and
+			    f_has_record(v_seen, p_type, f_ipv6(tsp_group))) {
+				t_guard.stop;
+				return v_seen;
+			}
+		}
+		[] t_guard.timeout {
+			setverdict(fail, "no report with a type ", p_type,
+				   " record for the address within ", v_timeout, "s");
+			stop;
+		}
+		}
+	}
+
+	return v_seen;
+}
+
+/* Wait for a version 1 message of the given type for the address under test,
+ * letting everything else past.
+ */
+function f_await_type(in integer p_type, in float p_timeout := -1.0)
+runs on MLD_MTC return MldSeen
+{
+	var float v_timeout := p_timeout;
+	var MldSeen v_seen;
+
+	if (v_timeout < 0.0) {
+		v_timeout := tsp_response_timeout;
+	}
+
+	t_guard.start(v_timeout);
+	while (true) {
+		var Ethernet_Frame v_frame;
+
+		alt {
+		[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+			if (f_as_mld(v_frame, v_seen) and v_seen.msgType == p_type and
+			    v_seen.mcastAddr == f_ipv6(tsp_group)) {
+				t_guard.stop;
+				return v_seen;
+			}
+		}
+		[] t_guard.timeout {
+			setverdict(fail, "no message of type ", p_type,
+				   " for the address within ", v_timeout, "s");
+			stop;
+		}
+		}
+	}
+
+	return v_seen;
+}
+
+/* Require that no report of the current state of the address under test or
+ * of the other one arrives within the silence timeout. Reports of a state
+ * change are let past: the application keeps joining and leaving whatever the
+ * tester does, and those are not an answer to anything. A version 1 report
+ * for either address counts as an answer, as version 1 has no other kind.
+ */
+function f_expect_no_current_state(in charstring p_why) runs on MLD_MTC
+{
+	var Ethernet_Frame v_frame;
+	var MldSeen v_seen;
+
+	t_guard.start(tsp_silence_timeout);
+	alt {
+	[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+		if (f_as_mld(v_frame, v_seen) and
+		    (f_has_record(v_seen, c_record_is_include, f_ipv6(tsp_group)) or
+		     f_has_record(v_seen, c_record_is_exclude, f_ipv6(tsp_group)) or
+		     f_has_record(v_seen, c_record_is_include, f_ipv6(tsp_other_group)) or
+		     f_has_record(v_seen, c_record_is_exclude, f_ipv6(tsp_other_group)) or
+		     (v_seen.msgType == c_type_report_v1 and
+		      (v_seen.mcastAddr == f_ipv6(tsp_group) or
+		       v_seen.mcastAddr == f_ipv6(tsp_other_group))))) {
+			t_guard.stop;
+			setverdict(fail, "answered when it should have stayed quiet: ", p_why);
+		} else {
+			repeat;
+		}
+	}
+	[] t_guard.timeout {
+		setverdict(pass);
+	}
+	}
+}
+
+/* The next join, known to be a fresh one: the report of a leave comes first,
+ * so that the report which follows is the first of a join and not the repeat
+ * of one that was already under way when the test started looking.
+ */
+function f_await_fresh_join() runs on MLD_MTC return MldSeen
+{
+	f_await_record(c_record_to_include);
+
+	return f_await_record(c_record_to_exclude);
+}
+
+/* Everything any MLD message has to get right on the outside: a link-local
+ * source, hop limit 1, the Router Alert option, a checksum that adds up.
+ * RFC 3810 5, RFC 2710 3.
+ */
+function f_check_shape(in MldSeen p_seen, in charstring p_dst) runs on MLD_MTC
+{
+	if (p_seen.ipDst != f_ipv6(p_dst)) {
+		setverdict(fail, "the message went to ", oct2str(p_seen.ipDst),
+			   " rather than to ", p_dst);
+	}
+	if (p_seen.ethDst != f_multicast_mac(f_ipv6(p_dst))) {
+		setverdict(fail, "the message went to ethernet address ", p_seen.ethDst,
+			   " rather than the one that belongs to ", p_dst);
+	}
+	if (not f_is_link_local(p_seen.ipSrc)) {
+		setverdict(fail, "the message came from ", oct2str(p_seen.ipSrc),
+			   " rather than from a link-local address");
+	}
+	if (p_seen.hopLimit != 1) {
+		setverdict(fail, "the message left with hop limit ", p_seen.hopLimit,
+			   " rather than 1");
+	}
+	if (not p_seen.routerAlert) {
+		setverdict(fail, "the message carries no Router Alert option");
+	}
+	if (not p_seen.checksumOk) {
+		setverdict(fail, "the checksum of the message is wrong");
+	}
+}
+
+/* A version 2 report goes to the MLDv2 routers, RFC 3810 5.2.14. */
+function f_check_v2_report_shape(in MldSeen p_seen) runs on MLD_MTC
+{
+	f_check_shape(p_seen, c_mldv2_routers);
+}
+
+function f_open() runs on MLD_MTC
+{
+	map(mtc:pt, system:pt);
+}
+
+function f_close() runs on MLD_MTC
+{
+	unmap(mtc:pt, system:pt);
+}
+
+/*
+ * MLDv2
+ */
+
+/* Joining an address is reported at once: a State Change Report to the MLDv2
+ * routers, carrying a change to EXCLUDE mode with no sources for the address.
+ * RFC 3810 6.1, 5.2.12, 5.2.14.
+ */
+testcase tc_join_is_reported() runs on MLD_MTC
+{
+	var MldSeen v_seen;
+
+	f_open();
+
+	v_seen := f_await_fresh_join();
+	f_check_v2_report_shape(v_seen);
+
+	for (var integer i := 0; i < lengthof(v_seen.records); i := i + 1) {
+		if (v_seen.records[i].mcastAddr == f_ipv6(tsp_group) and
+		    v_seen.records[i].sourceCount != 0) {
+			setverdict(fail, "the record for the address names ",
+				   v_seen.records[i].sourceCount,
+				   " sources where a join of the whole address names none");
+		}
+		if (v_seen.records[i].mcastAddr == f_ipv6(c_all_nodes)) {
+			setverdict(fail, "the report mentions ", c_all_nodes,
+				   ", which is never reported");
+		}
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/* The report of a join is sent Robustness Variable times in all, the repeats
+ * at random points within the Unsolicited Report Interval, so that one lost
+ * report does not leave the address unregistered. RFC 3810 6.1, 9.1, 9.11.
+ */
+testcase tc_join_report_is_repeated() runs on MLD_MTC
+{
+	var Ethernet_Frame v_frame;
+	var MldSeen v_seen;
+
+	f_open();
+
+	f_await_fresh_join();
+
+	/* Half a second past the interval, for the delay on the link. */
+	for (var integer i := 1; i < tsp_robustness; i := i + 1) {
+		f_await_record(c_record_to_exclude, c_unsolicited_report_interval + 0.5);
+	}
+
+	/* And then no more of them. */
+	t_guard.start(c_unsolicited_report_interval + 0.5);
+	alt {
+	[] pt.receive(Ethernet_Frame:?) -> value v_frame {
+		if (f_as_mld(v_frame, v_seen) and
+		    f_has_record(v_seen, c_record_to_exclude, f_ipv6(tsp_group))) {
+			t_guard.stop;
+			setverdict(fail, "the join was reported more than ",
+				   tsp_robustness, " times");
+		} else {
+			repeat;
+		}
+	}
+	[] t_guard.timeout {
+		setverdict(pass);
+	}
+	}
+
+	f_close();
+}
+
+/* A General Query is answered within its Maximum Response Delay with a
+ * Current State Report of every address the interface listens to, and never
+ * with the all-nodes address. RFC 3810 6.2, 6.3, 5.2.12, 6.
+ */
+testcase tc_general_query_is_answered() runs on MLD_MTC
+{
+	var MldSeen v_seen;
+
+	f_open();
+
+	f_await_fresh_join();
+	f_send_mld(f_query_v2(f_ipv6("::")), f_ipv6(c_all_nodes));
+
+	v_seen := f_await_record(c_record_is_exclude, c_max_resp_delay + 0.5);
+	f_check_v2_report_shape(v_seen);
+
+	for (var integer i := 0; i < lengthof(v_seen.records); i := i + 1) {
+		if (v_seen.records[i].mcastAddr == f_ipv6(c_all_nodes)) {
+			setverdict(fail, "the answer reports ", c_all_nodes,
+				   ", which is never reported");
+		}
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/* A Multicast Address Specific Query is answered by a listener of that
+ * address, with the state of that address alone, and by nobody else.
+ * RFC 3810 6.2, 6.3.
+ */
+testcase tc_address_specific_query_is_answered_by_listeners() runs on MLD_MTC
+{
+	var MldSeen v_seen;
+
+	f_open();
+
+	f_await_fresh_join();
+	f_send_mld(f_query_v2(f_ipv6(tsp_group)), f_ipv6(tsp_group));
+
+	v_seen := f_await_record(c_record_is_exclude, c_max_resp_delay + 0.5);
+	f_check_v2_report_shape(v_seen);
+
+	if (lengthof(v_seen.records) != 1) {
+		setverdict(fail, "the answer to a query for one address carries ",
+			   lengthof(v_seen.records), " records");
+	}
+
+	/* The same question about an address it does not listen to. */
+	f_send_mld(f_query_v2(f_ipv6(tsp_other_group)), f_ipv6(tsp_other_group));
+	f_expect_no_current_state("a query for an address it does not listen to");
+
+	f_close();
+}
+
+/* A query without the Router Alert option may have come from off the link,
+ * and is dropped. RFC 3810 6.2. These three ask a General Query, which every
+ * listener answers when it is valid.
+ */
+testcase tc_query_without_router_alert_is_ignored() runs on MLD_MTC
+{
+	f_open();
+
+	f_await_fresh_join();
+	f_send_mld(f_query_v2(f_ipv6("::")), f_ipv6(c_all_nodes), false);
+
+	f_expect_no_current_state("a query without the Router Alert option");
+
+	f_close();
+}
+
+/* So is a query whose hop limit is not 1. RFC 3810 6.2. */
+testcase tc_query_with_wrong_hop_limit_is_ignored() runs on MLD_MTC
+{
+	f_open();
+
+	f_await_fresh_join();
+	f_send_mld(f_query_v2(f_ipv6("::")), f_ipv6(c_all_nodes), true, 64);
+
+	f_expect_no_current_state("a query with hop limit 64");
+
+	f_close();
+}
+
+/* And a query whose source is not a link-local address. RFC 3810 5.1.14,
+ * 6.2.
+ */
+testcase tc_query_from_global_source_is_ignored() runs on MLD_MTC
+{
+	f_open();
+
+	f_await_fresh_join();
+	f_send_mld(f_query_v2(f_ipv6("::")), f_ipv6(c_all_nodes), true, 1, tsp_tester_ipv6);
+
+	f_expect_no_current_state("a query from a global address");
+
+	f_close();
+}
+
+/* Leaving an address is reported as a change to INCLUDE mode with no
+ * sources, which is the non-existent state. RFC 3810 6.1.
+ */
+testcase tc_leave_is_reported() runs on MLD_MTC
+{
+	var MldSeen v_seen;
+
+	f_open();
+
+	v_seen := f_await_record(c_record_to_include);
+	f_check_v2_report_shape(v_seen);
+
+	for (var integer i := 0; i < lengthof(v_seen.records); i := i + 1) {
+		if (v_seen.records[i].mcastAddr == f_ipv6(tsp_group) and
+		    v_seen.records[i].sourceCount != 0) {
+			setverdict(fail, "the record for the address names ",
+				   v_seen.records[i].sourceCount,
+				   " sources where a leave names none");
+		}
+	}
+
+	setverdict(pass);
+	f_close();
+}
+
+/*
+ * An older querier. From here on the system under test is left in MLDv1
+ * compatibility mode, see the top of the file.
+ */
+
+/* Hearing an MLDv1 General Query, one of 24 octets, puts the node in MLDv1
+ * compatibility mode: it answers that query with a version 1 report to the
+ * address, and reports its next leave and join in version 1 as well, the
+ * leave as a Done to all routers. RFC 3810 8.1, 8.2.1, RFC 2710 4, 5, 8.
+ */
+testcase tc_v1_querier_moves_the_listener_to_v1() runs on MLD_MTC
+{
+	var MldSeen v_seen;
+
+	f_open();
+
+	f_await_fresh_join();
+	f_send_mld(f_query_v1(f_ipv6("::")), f_ipv6(c_all_nodes));
+
+	v_seen := f_await_type(c_type_report_v1, c_max_resp_delay + 0.5);
+	f_check_shape(v_seen, tsp_group);
+
+	v_seen := f_await_type(c_type_done_v1);
+	f_check_shape(v_seen, c_all_routers);
+
+	v_seen := f_await_type(c_type_report_v1);
+	f_check_shape(v_seen, tsp_group);
+
+	setverdict(pass);
+	f_close();
+}
+
+/* In MLDv1 mode a report heard from another listener of the address stands
+ * for this node's own: a pending answer to a query is dropped. RFC 2710 4.
+ * MLDv2 has no such suppression, RFC 3810 8.2.2, which is why this runs in
+ * version 1 mode. First a query alone, to see that it is answered at all, then
+ * a query followed by the other listener's report.
+ */
+testcase tc_v1_report_heard_suppresses_the_answer() runs on MLD_MTC
+{
+	f_open();
+
+	/* A fresh join in version 1: the Done of the leave before it. */
+	f_await_type(c_type_done_v1);
+	f_await_type(c_type_report_v1);
+
+	f_send_mld(f_query_v1(f_ipv6(tsp_group)), f_ipv6(tsp_group));
+	f_await_type(c_type_report_v1, c_max_resp_delay + 0.5);
+
+	f_send_mld(f_query_v1(f_ipv6(tsp_group)), f_ipv6(tsp_group));
+	f_send_mld(f_report_v1(f_ipv6(tsp_group)), f_ipv6(tsp_group));
+
+	f_expect_no_current_state("a query whose answer another listener has already given");
+
+	f_close();
+}
+
+control {
+	execute(tc_join_is_reported());
+	execute(tc_join_report_is_repeated());
+	execute(tc_general_query_is_answered());
+	execute(tc_address_specific_query_is_answered_by_listeners());
+	execute(tc_query_without_router_alert_is_ignored());
+	execute(tc_query_with_wrong_hop_limit_is_ignored());
+	execute(tc_query_from_global_source_is_ignored());
+	execute(tc_leave_is_reported());
+	execute(tc_v1_querier_moves_the_listener_to_v1());
+	execute(tc_v1_report_heard_suppresses_the_answer());
+}
+
+}
