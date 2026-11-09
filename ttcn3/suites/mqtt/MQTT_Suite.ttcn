@@ -104,7 +104,7 @@ runs on MQTT_MTC return MQTT_v3_1_1_ReqResp
 	return v_msg.msg;
 }
 
-function f_send_message(in MQTT_v3_1_1_ReqResp p_msg) runs on MQTT_MTC
+function f_encode(in MQTT_v3_1_1_ReqResp p_msg) return octetstring
 {
 	var octetstring v_bytes;
 
@@ -113,7 +113,12 @@ function f_send_message(in MQTT_v3_1_1_ReqResp p_msg) runs on MQTT_MTC
 		stop;
 	}
 
-	f_send(v_bytes);
+	return v_bytes;
+}
+
+function f_send_message(in MQTT_v3_1_1_ReqResp p_msg) runs on MQTT_MTC
+{
+	f_send(f_encode(p_msg));
 }
 
 /* Wait for a message of one kind, letting anything else past. Used by the
@@ -170,6 +175,40 @@ function f_expect_no_more(in charstring p_why) runs on MQTT_MTC
 	}
 }
 
+/* Require that the client closes this connection, letting past whatever it
+ * still says on it first. A client that is about to notice a protocol
+ * violation may already have a publish or a ping on its way.
+ *
+ * The connection is forgotten once it has closed, so that f_tcp_close only
+ * closes the socket that was listening.
+ */
+function f_expect_close(in charstring p_why) runs on MQTT_MTC
+{
+	var ASP_Event v_event;
+	var IPL4asp_Types.ConnectionId v_this := v_connId;
+
+	t_guard.start(tsp_response_timeout);
+	alt {
+	[] pt.receive(ASP_Event:{ connClosed := ? }) -> value v_event {
+		if (v_event.connClosed.connId != v_this) {
+			repeat;
+		}
+		t_guard.stop;
+		v_connId := -1;
+		setverdict(pass);
+	}
+	[] pt.receive(ASP_RecvFrom:?) {
+		repeat;
+	}
+	[] pt.receive(ASP_Event:?) {
+		repeat;
+	}
+	[] t_guard.timeout {
+		setverdict(fail, "kept the connection open after ", p_why);
+	}
+	}
+}
+
 /* The answer that lets a client get on with it, MQTT 3.1.1 section 3.2. */
 function f_connack(in integer p_code := c_connack_accepted)
 return MQTT_v3_1_1_ReqResp
@@ -178,6 +217,23 @@ return MQTT_v3_1_1_ReqResp
 			header := { flags := '0000'B },
 			session_present_flag := '0'B,
 			connect_return_code := p_code } };
+}
+
+/* A publish to the client at most once, section 3.3.
+ *
+ * It carries no payload. The system under test reads none, and Zephyr's client
+ * refuses to read anything further while a payload is left unread, which
+ * would close the connection for a reason of its own.
+ */
+function f_publish() return MQTT_v3_1_1_ReqResp
+{
+	return { publish := {
+			header := { dup_flag := '0'B,
+				    qos_level := AT_MOST_ONCE_DELIVERY,
+				    retain_flag := '0'B },
+			topic_name := tsp_topic,
+			packet_identifier := omit,
+			payload := ''O } };
 }
 
 /* The acknowledgement of a publish sent at least once, section 3.4. */
@@ -369,12 +425,58 @@ testcase tc_refused_connection_is_not_used() runs on MQTT_MTC
 	f_tcp_close();
 }
 
+/* A broker answers the one connect on a connection with one connack, so a
+ * second one is a protocol violation, and a client that meets one closes the
+ * connection. MQTT 3.1.1 sections 3.2 and 4.8.
+ */
+testcase tc_second_connack_closes_the_connection() runs on MQTT_MTC
+{
+	f_connected();
+
+	f_send_message(f_connack());
+
+	f_expect_close("a second connack");
+
+	f_tcp_close();
+}
+
+/* The first thing a broker sends on a connection is the connack, so anything
+ * before it is a protocol violation, and a client that meets one closes the
+ * connection rather than taking the message. MQTT 3.1.1 sections 3.2 and 4.8.
+ *
+ * The connack follows the publish in the same send, so that a client which
+ * took the publish is then connected and goes on to publish, rather than
+ * waiting for a connack that never comes.
+ */
+testcase tc_publish_before_the_connack_closes_the_connection() runs on MQTT_MTC
+{
+	var MQTT_v3_1_1_ReqResp v_msg;
+
+	f_open();
+
+	v_msg := f_await_message();
+	if (not ischosen(v_msg.connect_msg)) {
+		setverdict(fail, "the first message on a new connection was "&
+			   "not a connect");
+		f_tcp_close();
+		stop;
+	}
+
+	f_send(f_encode(f_publish()) & f_encode(f_connack()));
+
+	f_expect_close("a publish ahead of the connack");
+
+	f_tcp_close();
+}
+
 control {
 	execute(tc_connect_is_well_formed());
 	execute(tc_nothing_is_sent_before_the_connack());
 	execute(tc_publish_is_well_formed());
 	execute(tc_keep_alive_is_sent_when_idle());
 	execute(tc_refused_connection_is_not_used());
+	execute(tc_second_connack_closes_the_connection());
+	execute(tc_publish_before_the_connack_closes_the_connection());
 }
 
 }
